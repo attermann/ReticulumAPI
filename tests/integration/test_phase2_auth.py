@@ -28,7 +28,7 @@ def _plain_config(auth_enabled: bool = False, password: str = "hunter2") -> Conf
 @pytest.mark.asyncio
 async def test_anonymous_mode_permits_all_and_returns_shared_token(rnsapi_home):
     cfg = _plain_config(auth_enabled=False)
-    app = build_app(cfg, rnsapi_home)
+    app = build_app(cfg, rnsapi_home, start_rns=False)
     server = TestServer(app)
     await server.start_server()
     try:
@@ -57,7 +57,7 @@ async def test_anonymous_mode_permits_all_and_returns_shared_token(rnsapi_home):
 @pytest.mark.asyncio
 async def test_login_logout_flow(rnsapi_home):
     cfg = _plain_config(auth_enabled=True, password="hunter2")
-    app = build_app(cfg, rnsapi_home)
+    app = build_app(cfg, rnsapi_home, start_rns=False)
     server = TestServer(app)
     await server.start_server()
     try:
@@ -94,7 +94,7 @@ async def test_login_logout_flow(rnsapi_home):
 @pytest.mark.asyncio
 async def test_ws_first_frame_auth_required_when_enabled(rnsapi_home):
     cfg = _plain_config(auth_enabled=True, password="hunter2")
-    app = build_app(cfg, rnsapi_home)
+    app = build_app(cfg, rnsapi_home, start_rns=False)
     server = TestServer(app)
     await server.start_server()
     try:
@@ -155,7 +155,7 @@ async def test_ws_first_frame_auth_required_when_enabled(rnsapi_home):
 async def test_ws_events_are_session_scoped(rnsapi_home):
     """A session.connected event fires only for that session's WS, not others."""
     cfg = _plain_config(auth_enabled=True, password="hunter2")
-    app = build_app(cfg, rnsapi_home)
+    app = build_app(cfg, rnsapi_home, start_rns=False)
     server = TestServer(app)
     await server.start_server()
     try:
@@ -234,7 +234,7 @@ async def test_reaper_expires_idle_sessions(rnsapi_home):
     """Wire the reaper with a short interval and inactivity=0 to exercise expiry."""
     cfg = _plain_config(auth_enabled=True, password="hunter2")
     cfg.auth.session_inactivity_timeout = 0  # expire everything immediately
-    app = build_app(cfg, rnsapi_home)
+    app = build_app(cfg, rnsapi_home, start_rns=False)
     server = TestServer(app)
     await server.start_server()
     try:

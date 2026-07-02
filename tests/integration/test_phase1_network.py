@@ -44,7 +44,7 @@ async def test_plaintext_health_version_ws(rnsapi_home):
     cfg.network = NetworkConfig(bind_host="127.0.0.1", bind_port=0, tls=False, allow_http=False)
     cfg.tls = TlsConfig(mode="disabled")
 
-    app = build_app(cfg, rnsapi_home)
+    app = build_app(cfg, rnsapi_home, start_rns=False)
 
     from aiohttp.test_utils import TestClient, TestServer
 
@@ -86,7 +86,7 @@ async def test_https_and_wss_with_self_signed_cert(rnsapi_home):
     assert cert_paths.cert.exists()
     assert cert_paths.key.exists()
 
-    app = build_app(cfg, rnsapi_home)
+    app = build_app(cfg, rnsapi_home, start_rns=False)
 
     from aiohttp import web
 
@@ -128,7 +128,7 @@ async def test_dual_listener_when_allow_http(rnsapi_home):
     cfg.tls = TlsConfig(mode="self_signed", self_signed_cn="localhost")
 
     ssl_ctx = build_ssl(cfg, rnsapi_home)
-    app = build_app(cfg, rnsapi_home)
+    app = build_app(cfg, rnsapi_home, start_rns=False)
 
     from aiohttp import web
 

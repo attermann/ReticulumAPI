@@ -16,11 +16,16 @@ from pathlib import Path
 from aiohttp import WSMsgType, web
 
 from . import __version__
+from .async_bridge import AsyncBridge
 from .auth.middleware import auth_middleware
 from .auth.session import SessionRegistry
 from .config import Config
-from .handlers import phase2_auth
+from .handlers import phase2_auth, phase3_identity, phase4_announce
 from .paths import StoragePaths
+from .rns.announces import AnnounceService
+from .rns.destinations import DestinationService
+from .rns.identities import IdentityService
+from .rns.service import RNSService
 from .tls import build_ssl_context, cert_fingerprint_sha256, ensure_self_signed
 from .ws.connection import WSConnection
 from .ws.hub import WSHub
@@ -135,10 +140,19 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
-def build_app(config: Config, storage: StoragePaths) -> web.Application:
+def build_app(
+    config: Config,
+    storage: StoragePaths,
+    *,
+    start_rns: bool = True,
+    rns_service: RNSService | None = None,
+) -> web.Application:
     hub = WSHub()
     router = WSRouter()
     sessions = SessionRegistry(config, hub)
+    identities = IdentityService(storage)
+    destinations = DestinationService()
+    announces = AnnounceService(hub)
 
     app = web.Application(
         client_max_size=config.limits.max_ws_message_bytes,
@@ -149,18 +163,38 @@ def build_app(config: Config, storage: StoragePaths) -> web.Application:
     app["hub"] = hub
     app["ws_router"] = router
     app["sessions"] = sessions
+    app["identities"] = identities
+    app["destinations"] = destinations
+    app["announces"] = announces
+    app["rns_service"] = rns_service if rns_service is not None else (RNSService(config) if start_rns else None)
+    app["_start_rns"] = start_rns and app["rns_service"] is not None
+
+    # Session cleanup teardowns owned destinations for the ending session.
+    sessions.register_cleanup(destinations.cleanup_session)
 
     app.router.add_get("/health", _health)
     app.router.add_get("/version", _version)
     app.router.add_get("/ws", _ws_handler)
 
     phase2_auth.register(app)
+    phase3_identity.register(app)
+    phase4_announce.register(app)
 
     async def _on_startup(_app):
+        AsyncBridge.set_main_loop(asyncio.get_running_loop())
+        # RNS.Reticulum initialisation installs signal handlers, so it must
+        # run on the main thread. Callers pass `start_rns=False` and call
+        # `rns_service.start()` themselves before starting the loop (see cli.py
+        # for the daemon path and conftest.py for tests).
+        announces.start()
         sessions.start_reaper()
 
     async def _on_cleanup(_app):
         await sessions.stop_reaper()
+        announces.stop()
+        if _app["_start_rns"] and _app["rns_service"] is not None:
+            _app["rns_service"].stop()
+        AsyncBridge.clear_main_loop()
 
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
@@ -184,9 +218,17 @@ def build_ssl(config: Config, storage: StoragePaths) -> ssl.SSLContext | None:
     return build_ssl_context(paths.cert, paths.key)
 
 
-async def run(config: Config, storage: StoragePaths) -> None:
+async def run(
+    config: Config,
+    storage: StoragePaths,
+    *,
+    rns_service: RNSService | None = None,
+) -> None:
     """Run the daemon until cancelled. Serves TLS and (optional) plaintext ports."""
-    app = build_app(config, storage)
+    # If the caller started RNS on the main thread already, pass it in and we
+    # won't try to start it ourselves.
+    start_rns = rns_service is None
+    app = build_app(config, storage, start_rns=start_rns, rns_service=rns_service)
 
     runner = web.AppRunner(app)
     await runner.setup()

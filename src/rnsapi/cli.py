@@ -12,6 +12,7 @@ from . import __version__
 from . import config as config_mod
 from . import logging_setup, paths, server
 from .auth.passwords import hash_password
+from .rns.service import RNSService
 from .tls import cert_fingerprint_sha256, ensure_self_signed
 
 
@@ -100,6 +101,10 @@ def main(argv: list[str] | None = None) -> int:
 
     log.info("rnsapid %s starting", __version__)
 
+    # RNS init must happen on the main thread (installs signal handlers).
+    rns_service = RNSService(cfg)
+    rns_service.start()
+
     loop = asyncio.new_event_loop()
     stop = asyncio.Event()
 
@@ -114,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
             signal.signal(sig, _shutdown)
 
     async def _run():
-        run_task = asyncio.create_task(server.run(cfg, storage))
+        run_task = asyncio.create_task(server.run(cfg, storage, rns_service=rns_service))
         stop_task = asyncio.create_task(stop.wait())
         done, pending = await asyncio.wait(
             {run_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
@@ -136,6 +141,10 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        try:
+            rns_service.stop()
+        except Exception:
+            log.exception("RNS shutdown failed")
         loop.close()
     log.info("rnsapid exited cleanly")
     return 0
