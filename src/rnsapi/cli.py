@@ -11,6 +11,7 @@ from pathlib import Path
 from . import __version__
 from . import config as config_mod
 from . import logging_setup, paths, server
+from .auth.passwords import hash_password
 from .tls import cert_fingerprint_sha256, ensure_self_signed
 
 
@@ -26,6 +27,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--print-cert-fingerprint",
         action="store_true",
         help="Print the self-signed TLS cert's SHA-256 fingerprint and exit",
+    )
+    p.add_argument(
+        "--hash-password",
+        action="store_true",
+        help="Prompt for a password and print the hash to paste into config",
     )
     p.add_argument("--version", action="version", version=f"rnsapid {__version__}")
     return p.parse_args(argv)
@@ -56,6 +62,20 @@ def main(argv: list[str] | None = None) -> int:
 
     storage = paths.resolve(args.home)
     config_path = args.config or storage.config_file
+
+    if args.hash_password:
+        import getpass
+
+        pw = getpass.getpass("password: ")
+        again = getpass.getpass("confirm:  ")
+        if pw != again:
+            print("passwords do not match", file=sys.stderr)
+            return 1
+        if not pw:
+            print("empty password not allowed", file=sys.stderr)
+            return 1
+        print(hash_password(pw))
+        return 0
 
     if args.init:
         return _init_home(storage, config_path)

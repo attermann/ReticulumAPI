@@ -7,7 +7,6 @@ is a smoke test, not a TLS conformance test).
 from __future__ import annotations
 
 import asyncio
-import json
 import ssl
 
 import aiohttp
@@ -16,6 +15,16 @@ import pytest
 from rnsapi.config import Config, NetworkConfig, TlsConfig
 from rnsapi.server import build_app, build_ssl
 from rnsapi.tls import ensure_self_signed
+
+
+async def _read_attach(ws):
+    while True:
+        msg = await asyncio.wait_for(ws.receive(), timeout=5)
+        if msg.type.name != "TEXT":
+            continue
+        ev = msg.json()
+        if ev.get("type") == "auth.session.attached":
+            return ev
 
 
 async def _find_free_port() -> int:
@@ -55,15 +64,9 @@ async def test_plaintext_health_version_ws(rnsapi_home):
             assert body["protocol"] == {"rest": 1, "ws": 1}
 
             async with client.ws_connect("/ws") as ws:
-                await ws.send_str("hello")
-                msg = await asyncio.wait_for(ws.receive(), timeout=5)
-                assert msg.data == "hello"
-
-                payload = json.dumps({"type": "echo", "n": 1})
-                await ws.send_str(payload)
-                msg = await asyncio.wait_for(ws.receive(), timeout=5)
-                assert msg.data == payload
-
+                # In auth-disabled mode the server auto-attaches an anonymous session
+                attach = await _read_attach(ws)
+                assert attach["is_anonymous"] is True
                 await ws.close()
     finally:
         await server.close()
@@ -107,9 +110,8 @@ async def test_https_and_wss_with_self_signed_cert(rnsapi_home):
                 assert body == {"status": "ok"}
 
             async with session.ws_connect(f"wss://127.0.0.1:{port}/ws") as ws:
-                await ws.send_str("secure-hello")
-                msg = await asyncio.wait_for(ws.receive(), timeout=5)
-                assert msg.data == "secure-hello"
+                attach = await _read_attach(ws)
+                assert attach["is_anonymous"] is True
                 await ws.close()
     finally:
         await site.stop()
