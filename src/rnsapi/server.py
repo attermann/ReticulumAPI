@@ -26,11 +26,13 @@ from .handlers import (
     phase4_announce,
     phase5_paths,
     phase6_packets,
+    phase7_links,
 )
 from .paths import StoragePaths
 from .rns.announces import AnnounceService
 from .rns.destinations import DestinationService
 from .rns.identities import IdentityService
+from .rns.links import LinksService
 from .rns.packets import PacketsService
 from .rns.paths import PathsService
 from .rns.service import RNSService
@@ -163,6 +165,7 @@ def build_app(
     announces = AnnounceService(hub)
     paths_svc = PathsService(config, hub)
     packets_svc = PacketsService(hub, identities)
+    links_svc = LinksService(hub, identities)
 
     app = web.Application(
         client_max_size=config.limits.max_ws_message_bytes,
@@ -178,12 +181,15 @@ def build_app(
     app["announces"] = announces
     app["paths"] = paths_svc
     app["packets"] = packets_svc
+    app["links"] = links_svc
     app["rns_service"] = rns_service if rns_service is not None else (RNSService(config) if start_rns else None)
     app["_start_rns"] = start_rns and app["rns_service"] is not None
 
     # Session cleanup teardowns owned resources for the ending session.
-    # Packet callbacks / receipts are cleared before destinations so we don't
-    # deregister a destination that still has a callback pointing at us.
+    # Links are torn down first (they may hold references to destinations),
+    # then packet callbacks / receipts are cleared, then destinations are
+    # deregistered.
+    sessions.register_cleanup(links_svc.cleanup_session)
     sessions.register_cleanup(packets_svc.cleanup_session)
     sessions.register_cleanup(destinations.cleanup_session)
 
@@ -196,6 +202,7 @@ def build_app(
     phase4_announce.register(app)
     phase5_paths.register(app)
     phase6_packets.register(app)
+    phase7_links.register(app)
 
     async def _on_startup(_app):
         AsyncBridge.set_main_loop(asyncio.get_running_loop())

@@ -630,3 +630,146 @@ Response `200 OK`:
     "status": "FAILED"
   }
   ```
+
+## Links
+
+RNS Links are long-lived encrypted channels between two identities with
+forward secrecy. `rnsapid` maintains a **per-session** Link cache keyed on
+the target destination hash: within one session, subsequent `link.open`
+calls to the same destination reuse the existing Link and every WS
+connection currently attached to the session sees every Link event.
+
+The client-facing `link_id` **is** the destination hash (hex).
+
+### `POST /links`
+
+Open a Link (or reuse an existing one). Request:
+
+```json
+{
+  "identity_hash": "0123abc...",
+  "app_name": "myapp",
+  "aspects": ["messaging", "v1"],
+  "auto_identify": false,
+  "await_established": true,
+  "establishment_timeout": 15.0,
+  "path_lookup_timeout": 15.0
+}
+```
+
+- `auto_identify` — if `true`, the daemon calls `link.identify(session's
+  active identity)` after the link becomes ACTIVE.
+- `await_established` — if `true` (default), the response is returned only
+  after the link reaches ACTIVE (or the establishment timeout elapses).
+  If `false`, the response comes back immediately with the link in PENDING
+  and the client watches for the `link.established` event on WS.
+
+Response `201 Created` when a new link was opened (or `200 OK` when an
+existing link was reused):
+
+```json
+{
+  "reused": false,
+  "awaited": true,
+  "link_id": "abcdef...",
+  "destination_hash": "abcdef...",
+  "aspect": "myapp.messaging.v1",
+  "status": "ACTIVE",
+  "mtu": 500,
+  "mdu": 396,
+  "remote_identity_hash": "0123abc... or null",
+  "teardown_reason": null
+}
+```
+
+Errors:
+
+- `404 Not Found` — the target identity is unknown (announce it or path-request first).
+- `408 Request Timeout` — `await_established=true` and the link never became ACTIVE.
+- `400 Bad Request` — malformed input.
+
+### `GET /links`
+
+```json
+{"links": [ { link_snapshot }, ... ]}
+```
+
+### `GET /links/{id}`
+
+Return the current link snapshot. `404 Not Found` if the session doesn't own this link.
+
+### `DELETE /links/{id}`
+
+Tear down the link.
+
+### `POST /links/{id}/identify`
+
+Send the session's active identity to the remote side. `400 Bad Request` if
+the session has no active identity.
+
+### `POST /links/{id}/data`
+
+Send a raw data packet over the link.
+
+```json
+{"data_b64": "..."}
+```
+
+Emits `link.data.sent` to the session.
+
+### `POST /links/{id}/request`
+
+Send an RPC-style request over the link and **await** the response.
+
+```json
+{
+  "path": "/echo",
+  "data_b64": "optional base64 payload",
+  "timeout": 30
+}
+```
+
+Response `200 OK`:
+
+```json
+{
+  "ok": true,
+  "link_id": "...",
+  "path": "/echo",
+  "kind": "response",
+  "response_b64": "base64 of the response",
+  "size": 42
+}
+```
+
+Errors:
+
+- `408 Request Timeout` — the request awaited but no response arrived.
+- `502 Bad Gateway` — the remote reported the request failed.
+
+### WS message types (Phase 7)
+
+| Inbound `type`     | Reply / event                                        |
+| ------------------ | ---------------------------------------------------- |
+| `link.open`        | reply `link.open.result`                             |
+| `link.close`       | reply `link.close.result`                            |
+| `link.identify`    | reply `link.identify.result`                         |
+| `link.send`        | reply `link.send.result` + event `link.data.sent`    |
+| `link.request`     | reply `link.request.result` (acknowledgement) + later `link.request.response` / `link.request.failed` |
+| `link.status`      | reply `link.status.result`                           |
+| `link.list`        | reply `link.list.result`                             |
+
+### Server-emitted link events (session-scoped)
+
+- `link.established`      — link reached ACTIVE
+- `link.closed`           — link torn down (any reason)
+- `link.disconnected`     — link closed by remote (fires alongside `link.closed` when the teardown reason is not `initiator_closed`)
+- `link.remote_identified` — remote sent us their identity via `link.identify`
+- `link.data.received`    — an inbound packet arrived on the link
+- `link.data.sent`        — we sent an outbound packet on the link
+- `link.proof`            — reserved for future proof-tracking events (see Phase 6 `packet.receipt.*` for the current shape)
+- `link.request.response` — an RPC response arrived
+- `link.request.failed`   — an RPC request failed
+
+Each event payload includes `session_id`, `link_id`, `destination_hash`,
+and `aspect`. See `src/rnsapi/rns/links.py` for the exact schema.
