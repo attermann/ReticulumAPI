@@ -486,3 +486,147 @@ the request completes (found or timed out), and the session-only
 `path.request.sent` event fires as with REST.
 
 Reply (targeted): `paths.request.result` with `found` + path fields.
+
+## Packets
+
+Packet operations are session-scoped: listeners only fire on destinations
+that belong to the current session, and receipt callbacks route back to
+the session that initiated the send.
+
+### `POST /packets/listen`
+
+Attach a packet callback to one of your session's owned destinations. Every
+subsequent packet delivered to that destination fires a session-only
+`packet.received` event.
+
+Request:
+
+```json
+{"destination_hash": "abcdef..."}
+```
+
+Response `201 Created`:
+
+```json
+{"ok": true, "destination_hash": "abcdef..."}
+```
+
+`404 Not Found` if the destination is not owned by this session.
+
+### `DELETE /packets/listen/{hash}`
+
+Detach the callback. `404 Not Found` if not currently listening.
+
+### `GET /packets/listen`
+
+```json
+{"destination_hashes": ["abcdef...", ...]}
+```
+
+### `POST /packets/send`
+
+Encrypt and send a Packet to a target identity. The target destination is
+constructed at send time from the given identity hash + app_name + aspects
+(same three fields that determine a destination's hash on the other side).
+
+Request:
+
+```json
+{
+  "identity_hash": "0123abc...",
+  "app_name": "myapp",
+  "aspects": ["messaging", "v1"],
+  "data_b64": "base64 of the payload",
+  "proof_timeout": 15
+}
+```
+
+`proof_timeout` is optional; when set, adjusts how long the daemon holds
+the `PacketReceipt` before firing `packet.receipt.failed`. The target
+identity is resolved by:
+
+1. Looking it up in the local identity store
+   (`~/.config/rnsapi/identities/`), and if not found,
+2. Calling `RNS.Identity.recall(...)` (which succeeds once an announce
+   carrying this identity's public key has been received).
+
+If neither succeeds, the endpoint returns `404 Not Found`.
+
+Response `200 OK`:
+
+```json
+{
+  "ok": true,
+  "destination_hash": "computed hex hash of the OUT destination",
+  "identity_hash": "0123abc...",
+  "packet_hash": "hex of the packet hash, if RNS assigned one",
+  "size": 42,
+  "has_receipt": true
+}
+```
+
+### WS message types (Phase 6)
+
+| Inbound `type`         | Reply / event                                                     |
+| ---------------------- | ----------------------------------------------------------------- |
+| `packets.listen`       | reply: `packets.listen.result`                                    |
+| `packets.unlisten`     | reply: `packets.unlisten.result`                                  |
+| `packets.listeners`    | reply: `packets.listeners.result`                                 |
+| `packets.send`         | reply: `packets.send.result` + server broadcasts `packet.sent`    |
+
+### Server-emitted packet events (session-scoped)
+
+- `packet.received` — a packet arrived on a listened destination:
+
+  ```json
+  {
+    "type": "packet.received",
+    "session_id": "...",
+    "destination_hash": "abcdef...",
+    "data_b64": "base64 of plaintext",
+    "size": 42,
+    "packet_hash": "hex or null",
+    "hops": 2,
+    "rssi": null,
+    "snr": null
+  }
+  ```
+
+- `packet.sent` — this daemon just dispatched a packet:
+
+  ```json
+  {
+    "type": "packet.sent",
+    "session_id": "...",
+    "destination_hash": "computed OUT dest hash",
+    "identity_hash": "0123abc...",
+    "packet_hash": "hex",
+    "size": 42,
+    "has_receipt": true
+  }
+  ```
+
+- `packet.receipt.delivered` — a proof arrived for a packet we sent:
+
+  ```json
+  {
+    "type": "packet.receipt.delivered",
+    "session_id": "...",
+    "destination_hash": "computed OUT dest hash",
+    "packet_hash": "hex",
+    "rtt": 0.427,
+    "status": "DELIVERED"
+  }
+  ```
+
+- `packet.receipt.failed` — the receipt timed out or otherwise failed:
+
+  ```json
+  {
+    "type": "packet.receipt.failed",
+    "session_id": "...",
+    "destination_hash": "computed OUT dest hash",
+    "packet_hash": "hex",
+    "status": "FAILED"
+  }
+  ```

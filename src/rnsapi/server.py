@@ -20,11 +20,18 @@ from .async_bridge import AsyncBridge
 from .auth.middleware import auth_middleware
 from .auth.session import SessionRegistry
 from .config import Config
-from .handlers import phase2_auth, phase3_identity, phase4_announce, phase5_paths
+from .handlers import (
+    phase2_auth,
+    phase3_identity,
+    phase4_announce,
+    phase5_paths,
+    phase6_packets,
+)
 from .paths import StoragePaths
 from .rns.announces import AnnounceService
 from .rns.destinations import DestinationService
 from .rns.identities import IdentityService
+from .rns.packets import PacketsService
 from .rns.paths import PathsService
 from .rns.service import RNSService
 from .tls import build_ssl_context, cert_fingerprint_sha256, ensure_self_signed
@@ -155,6 +162,7 @@ def build_app(
     destinations = DestinationService()
     announces = AnnounceService(hub)
     paths_svc = PathsService(config, hub)
+    packets_svc = PacketsService(hub, identities)
 
     app = web.Application(
         client_max_size=config.limits.max_ws_message_bytes,
@@ -169,10 +177,14 @@ def build_app(
     app["destinations"] = destinations
     app["announces"] = announces
     app["paths"] = paths_svc
+    app["packets"] = packets_svc
     app["rns_service"] = rns_service if rns_service is not None else (RNSService(config) if start_rns else None)
     app["_start_rns"] = start_rns and app["rns_service"] is not None
 
-    # Session cleanup teardowns owned destinations for the ending session.
+    # Session cleanup teardowns owned resources for the ending session.
+    # Packet callbacks / receipts are cleared before destinations so we don't
+    # deregister a destination that still has a callback pointing at us.
+    sessions.register_cleanup(packets_svc.cleanup_session)
     sessions.register_cleanup(destinations.cleanup_session)
 
     app.router.add_get("/health", _health)
@@ -183,6 +195,7 @@ def build_app(
     phase3_identity.register(app)
     phase4_announce.register(app)
     phase5_paths.register(app)
+    phase6_packets.register(app)
 
     async def _on_startup(_app):
         AsyncBridge.set_main_loop(asyncio.get_running_loop())
