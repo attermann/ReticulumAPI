@@ -3,8 +3,53 @@
 `rnsapid` exposes REST and WebSocket endpoints on a shared port. Both
 protocols share the same authentication, session model, and permission set.
 
-The endpoints listed below reflect the current phase of implementation. Later
-phases add more endpoints; the file grows as those land.
+## Contents
+
+- [Common conventions](#common-conventions)
+- [Authentication](#authentication)
+- [REST endpoints](#rest-endpoints) — `/health`, `/version`, `/auth/*`, `/session`
+- [WebSocket endpoints](#websocket-endpoints) — `/ws` lifecycle + `ping`/`session.info`/`auth.logout`
+- [Identities](#identities) — `/identities`, `/identities/{hash}`
+- [Active identity](#active-identity) — `/session/active-identity`
+- [Destinations](#destinations) — `/destinations`
+- [Announces](#announces) — `/announce` + global `announce.*` events
+- [Paths](#paths) — `/paths`, `/paths/request`
+- [Packets](#packets) — `/packets/listen`, `/packets/send`, receipt events
+- [Links](#links) — `/links/*`, all Link lifecycle events
+
+### Endpoint index
+
+| Method | Path                                | Introduced in |
+| ------ | ----------------------------------- | ------------- |
+| GET    | `/health`                           | Phase 1       |
+| GET    | `/version`                          | Phase 1       |
+| GET    | `/ws`                               | Phase 1 / 2   |
+| POST   | `/auth/login`                       | Phase 2       |
+| POST   | `/auth/logout`                      | Phase 2       |
+| GET    | `/session`                          | Phase 2       |
+| POST   | `/identities`                       | Phase 3       |
+| GET    | `/identities`                       | Phase 3       |
+| GET    | `/identities/{hash}`                | Phase 3       |
+| GET    | `/session/active-identity`          | Phase 3       |
+| PUT    | `/session/active-identity`          | Phase 3       |
+| DELETE | `/session/active-identity`          | Phase 3       |
+| GET    | `/destinations`                     | Phase 3       |
+| POST   | `/destinations`                     | Phase 3       |
+| DELETE | `/destinations/{hash}`              | Phase 3       |
+| POST   | `/announce`                         | Phase 4       |
+| GET    | `/paths`                            | Phase 5       |
+| POST   | `/paths/request`                    | Phase 5       |
+| POST   | `/packets/listen`                   | Phase 6       |
+| DELETE | `/packets/listen/{hash}`            | Phase 6       |
+| GET    | `/packets/listen`                   | Phase 6       |
+| POST   | `/packets/send`                     | Phase 6       |
+| POST   | `/links`                            | Phase 7       |
+| GET    | `/links`                            | Phase 7       |
+| GET    | `/links/{id}`                       | Phase 7       |
+| DELETE | `/links/{id}`                       | Phase 7       |
+| POST   | `/links/{id}/identify`              | Phase 7       |
+| POST   | `/links/{id}/data`                  | Phase 7       |
+| POST   | `/links/{id}/request`               | Phase 7       |
 
 ## Common conventions
 
@@ -14,6 +59,7 @@ phases add more endpoints; the file grows as those land.
   hex strings unless noted otherwise.
 - **WS messages** are JSON objects with a `type` field. Requests may include
   a client-generated `id` field, which is echoed on the response frame.
+- **All timestamps** are Unix epoch seconds (float).
 
 ## Authentication
 
