@@ -20,11 +20,12 @@ from .async_bridge import AsyncBridge
 from .auth.middleware import auth_middleware
 from .auth.session import SessionRegistry
 from .config import Config
-from .handlers import phase2_auth, phase3_identity, phase4_announce
+from .handlers import phase2_auth, phase3_identity, phase4_announce, phase5_paths
 from .paths import StoragePaths
 from .rns.announces import AnnounceService
 from .rns.destinations import DestinationService
 from .rns.identities import IdentityService
+from .rns.paths import PathsService
 from .rns.service import RNSService
 from .tls import build_ssl_context, cert_fingerprint_sha256, ensure_self_signed
 from .ws.connection import WSConnection
@@ -153,6 +154,7 @@ def build_app(
     identities = IdentityService(storage)
     destinations = DestinationService()
     announces = AnnounceService(hub)
+    paths_svc = PathsService(config, hub)
 
     app = web.Application(
         client_max_size=config.limits.max_ws_message_bytes,
@@ -166,6 +168,7 @@ def build_app(
     app["identities"] = identities
     app["destinations"] = destinations
     app["announces"] = announces
+    app["paths"] = paths_svc
     app["rns_service"] = rns_service if rns_service is not None else (RNSService(config) if start_rns else None)
     app["_start_rns"] = start_rns and app["rns_service"] is not None
 
@@ -179,6 +182,7 @@ def build_app(
     phase2_auth.register(app)
     phase3_identity.register(app)
     phase4_announce.register(app)
+    phase5_paths.register(app)
 
     async def _on_startup(_app):
         AsyncBridge.set_main_loop(asyncio.get_running_loop())
@@ -186,6 +190,14 @@ def build_app(
         # run on the main thread. Callers pass `start_rns=False` and call
         # `rns_service.start()` themselves before starting the loop (see cli.py
         # for the daemon path and conftest.py for tests).
+        rns_svc = _app.get("rns_service")
+        if rns_svc is not None and rns_svc.reticulum is not None:
+            paths_svc.attach(rns_svc.reticulum)
+        else:
+            # Attach whichever RNS.Reticulum instance is current (e.g. session-
+            # scoped test fixture) so path-table queries can still succeed.
+            import RNS
+            paths_svc.attach(RNS.Reticulum.get_instance())
         announces.start()
         sessions.start_reaper()
 

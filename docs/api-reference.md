@@ -388,3 +388,101 @@ parallel, broadcasts `announce.sent` to every connected WS.
     "app_data_b64": null
   }
   ```
+
+## Paths
+
+RNS routing paths (destination → next-hop-interface, hop count, expiry) can
+be inspected via `/paths`, and new paths can be discovered by sending a
+path-request over the network.
+
+> **Limitation:** RNS exposes no public listener for *incoming* path-request
+> packets, and `rnsapid` refuses to monkey-patch RNS internals. There is
+> therefore no `path.request.received` event.
+
+### `GET /paths`
+
+Query the routing table. Query params:
+
+| Param         | Meaning                                                    |
+| ------------- | ---------------------------------------------------------- |
+| `destination` | Return only the entry for this destination hash (32 hex).  |
+| `interface`   | Return only entries reached via this interface name.       |
+| `max_hops`    | Return only entries within this hop count.                 |
+
+Response `200 OK`:
+
+```json
+{
+  "paths": [
+    {
+      "hash":      "abcdef...",
+      "via":       "0123ab...",
+      "hops":      2,
+      "interface": "AutoInterface[default]",
+      "timestamp": 1720000000.0,
+      "expires":   1720003600.0
+    }
+  ]
+}
+```
+
+`400 Bad Request` on invalid parameters.
+
+### `POST /paths/request`
+
+Send a path-request for a destination and *await* the response (or timeout).
+
+Request:
+
+```json
+{
+  "destination_hash": "abcdef...",
+  "timeout": 15
+}
+```
+
+`timeout` is optional and falls back to `[limits] path_request_timeout`
+from config.
+
+Response `200 OK` when the path is discovered before the timeout:
+
+```json
+{
+  "found": true,
+  "destination_hash": "abcdef...",
+  "hops": 3,
+  "next_hop": "0123ab...",
+  "interface": "AutoInterface[default]"
+}
+```
+
+Response `408 Request Timeout` when no path was found before the deadline:
+
+```json
+{"found": false, "destination_hash": "abcdef..."}
+```
+
+While the request is outstanding, the server emits `path.request.sent` to
+**the current session's** WS connections only:
+
+```json
+{
+  "type": "path.request.sent",
+  "session_id": "...",
+  "destination_hash": "abcdef..."
+}
+```
+
+### WS message `paths.query`
+
+Same as `GET /paths`. Params match the query-string names.
+
+Reply (targeted): `paths.query.result` with the same body as the REST reply.
+
+### WS message `paths.request`
+
+Same as `POST /paths/request` but asynchronous — the WS reply comes when
+the request completes (found or timed out), and the session-only
+`path.request.sent` event fires as with REST.
+
+Reply (targeted): `paths.request.result` with `found` + path fields.
