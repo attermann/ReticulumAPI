@@ -2,7 +2,7 @@
 
 A REST + WebSocket API daemon that exposes the full [Reticulum Network
 Stack](https://reticulum.network/) (RNS) service surface — identities,
-destinations, announces, paths, packets, and links — over HTTP(S) and WSS.
+destinations, announces, paths, packets, and links — over HTTP(S) and WS(S).
 
 `rnsapid` runs as a normal RNS client application: it imports the installed
 `RNS` package and calls `RNS.Reticulum(...)`. By default it shares the user's
