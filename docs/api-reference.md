@@ -937,11 +937,15 @@ Errors:
 - `link.data.received`    — an inbound packet arrived on the link
 - `link.data.sent`        — we sent an outbound packet on the link
 - `link.proof`            — reserved for future proof-tracking events (see `packet.receipt.*` for the current shape)
-- `link.request.response` — an RPC response arrived
-- `link.request.failed`   — an RPC request failed
+- `link.request.response` — an RPC response arrived (echoes the client-provided
+  `id` from the originating `link.request` so multiple concurrent
+  requests can be correlated)
+- `link.request.failed`   — an RPC request failed (also echoes `id`)
 
 Each event payload includes `session_id`, `link_id`, `destination_hash`,
-and `aspect`. See `src/rnsapi/rns/links.py` for the exact schema.
+and `aspect`. `link.request.response` and `link.request.failed` also
+carry `id` (the value passed on the originating `link.request`, or
+`null` if omitted). See `src/rnsapi/rns/links.py` for the exact schema.
 
 ## Resources
 

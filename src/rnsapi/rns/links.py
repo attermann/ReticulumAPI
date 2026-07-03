@@ -409,6 +409,7 @@ class LinksService:
         timeout: Optional[float] = None,
         *,
         await_response: bool = True,
+        client_id: Optional[object] = None,
     ) -> dict:
         entry = self._entry(session, link_id)
         if not isinstance(path, str) or not path:
@@ -433,6 +434,7 @@ class LinksService:
                     {
                         "type": "link.request.response",
                         "session_id": session_id,
+                        "id": client_id,
                         "link_id": link_id_hex,
                         "path": path,
                         "response_b64": _b64(bytes(payload)) if payload else None,
@@ -452,6 +454,7 @@ class LinksService:
                     {
                         "type": "link.request.failed",
                         "session_id": session_id,
+                        "id": client_id,
                         "link_id": link_id_hex,
                         "path": path,
                     },

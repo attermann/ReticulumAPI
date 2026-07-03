@@ -240,9 +240,18 @@ async def ws_request(conn, msg: dict) -> None:
         await conn.send_json({"type": "error", "error": "link_id and path required", "id": msg.get("id")})
         return
     # WS variant does not wait synchronously — the response arrives on a
-    # link.request.response / link.request.failed event.
+    # link.request.response / link.request.failed event, which echoes the
+    # client-provided `id` so multiple in-flight requests can be correlated.
     try:
-        await svc.request(conn.session, link_id, path, data_b64, timeout, await_response=False)
+        await svc.request(
+            conn.session,
+            link_id,
+            path,
+            data_b64,
+            timeout,
+            await_response=False,
+            client_id=msg.get("id"),
+        )
     except LinkError as e:
         await conn.send_json({"type": "error", "error": str(e), "id": msg.get("id")})
         return

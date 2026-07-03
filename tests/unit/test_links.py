@@ -159,6 +159,66 @@ async def test_snapshot_shape(rns_instance):
 
 
 @pytest.mark.asyncio
+async def test_request_echoes_client_id_in_async_events(rnsapi_home, rns_instance):
+    """The client-provided `id` on a WS link.request must appear on the
+    async link.request.response / link.request.failed events so callers
+    can correlate multiple in-flight requests."""
+    session = _new_session()
+    hub = WSHub()
+    conn = _FakeConn(session)
+    hub.register(conn)
+    svc = LinksService(hub, IdentityService(rnsapi_home))
+
+    captured: dict = {}
+
+    class _StubLink:
+        status = 0x02  # ACTIVE
+        mtu = 500
+        mdu = 400
+        teardown_reason = None
+        def get_remote_identity(self): return None
+        def request(self, path, data=None, response_callback=None, failed_callback=None, timeout=None):
+            captured["response_cb"] = response_callback
+            captured["failed_cb"] = failed_callback
+
+    link = _StubLink()
+    dest_hash = bytes(secrets.token_bytes(16))
+    entry = _LinkEntry(link, dest_hash, "rnsapi_test.echo", "rnsapi_test", ["echo"])
+    session.open_links[dest_hash] = entry
+
+    AsyncBridge.set_main_loop(asyncio.get_running_loop())
+    try:
+        # Fire off two concurrent requests with distinct client ids.
+        await svc.request(session, dest_hash.hex(), "/a", None, None, await_response=False, client_id="req-alpha")
+        cb_a = captured["response_cb"]
+        failed_a = captured["failed_cb"]
+        await svc.request(session, dest_hash.hex(), "/b", None, None, await_response=False, client_id="req-beta")
+        cb_b = captured["response_cb"]
+        failed_b = captured["failed_cb"]
+
+        # Simulate: /a succeeds, /b fails.
+        class _R:
+            def __init__(self, payload): self.response = payload
+        cb_a(_R(b"hello"))
+        failed_b()
+
+        for _ in range(30):
+            await asyncio.sleep(0.02)
+            types = [e.get("type") for e in conn.sent]
+            if "link.request.response" in types and "link.request.failed" in types:
+                break
+
+        resp = next(e for e in conn.sent if e.get("type") == "link.request.response")
+        fail = next(e for e in conn.sent if e.get("type") == "link.request.failed")
+        assert resp["id"] == "req-alpha"
+        assert resp["path"] == "/a"
+        assert fail["id"] == "req-beta"
+        assert fail["path"] == "/b"
+    finally:
+        AsyncBridge.clear_main_loop()
+
+
+@pytest.mark.asyncio
 async def test_cleanup_tears_down_all_links(rns_instance):
     session = _new_session()
     svc = LinksService(WSHub())
