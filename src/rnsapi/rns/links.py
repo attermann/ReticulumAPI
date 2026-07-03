@@ -162,7 +162,8 @@ class LinksService:
         self,
         session: "Session",
         *,
-        identity_hash: str,
+        identity_hash: Optional[str] = None,
+        destination_hash: Optional[str] = None,
         app_name: str,
         aspects: list[str],
         auto_identify: bool = False,
@@ -170,15 +171,24 @@ class LinksService:
         establishment_timeout: float = 15.0,
         path_lookup_timeout: float = 15.0,
     ) -> dict:
-        ih = identity_hash.lower()
-        if not _HEX_HASH.match(ih):
-            raise LinkError(f"invalid identity hash: {identity_hash!r}")
+        # Accept either identity_hash or destination_hash as the lookup key.
+        # RNS.Identity.recall() resolves both to the target identity, and the
+        # webconsole workflow paste destination hashes rather than identity
+        # hashes — so both spellings are first-class.
+        source_hash = identity_hash if identity_hash is not None else destination_hash
+        if identity_hash is not None and destination_hash is not None:
+            raise LinkError("provide identity_hash or destination_hash, not both")
+        if source_hash is None:
+            raise LinkError("identity_hash or destination_hash is required")
+        h = source_hash.lower()
+        if not _HEX_HASH.match(h):
+            raise LinkError(f"invalid hash: {source_hash!r}")
         if not isinstance(app_name, str) or not _ASPECT_RE.match(app_name):
             raise LinkError("app_name must match [a-zA-Z0-9_]+")
         if not isinstance(aspects, list) or not all(_ASPECT_RE.match(a) for a in aspects):
             raise LinkError("aspects must be a list of [a-zA-Z0-9_]+ strings")
 
-        target_identity = self._resolve_identity(bytes.fromhex(ih))
+        target_identity = self._resolve_identity(bytes.fromhex(h))
         if target_identity is None:
             raise LinkError("no known identity for hash — issue an announce or path request first")
 

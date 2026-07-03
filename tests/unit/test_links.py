@@ -41,12 +41,22 @@ def _new_session():
 async def test_open_validates_input(rns_instance):
     svc = LinksService(WSHub())
     session = _new_session()
-    with pytest.raises(LinkError, match="invalid identity hash"):
+    with pytest.raises(LinkError, match="invalid hash"):
         await svc.open_link(session, identity_hash="nothex", app_name="a", aspects=["b"])
     with pytest.raises(LinkError, match="app_name"):
         await svc.open_link(session, identity_hash="ee" * 16, app_name="bad name", aspects=["b"])
     with pytest.raises(LinkError, match="aspects"):
         await svc.open_link(session, identity_hash="ee" * 16, app_name="a", aspects=["bad aspect"])
+    with pytest.raises(LinkError, match="not both"):
+        await svc.open_link(
+            session,
+            identity_hash="ee" * 16,
+            destination_hash="ee" * 16,
+            app_name="a",
+            aspects=["b"],
+        )
+    with pytest.raises(LinkError, match="required"):
+        await svc.open_link(session, app_name="a", aspects=["b"])
 
 
 @pytest.mark.asyncio

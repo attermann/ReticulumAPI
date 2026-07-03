@@ -93,8 +93,6 @@ allow_http = true` in the config.
 - **[API Reference](docs/api-reference.md)** — every REST endpoint and WS
   message type, with request/response schemas.
 - **[Configuration](docs/config.md)** — every INI key.
-- **[CLAUDE.md](CLAUDE.md)** — architecture, invariants, and contributor
-  guidance (also read by Claude Code when working on the project).
 
 ## Development
 
@@ -102,7 +100,7 @@ allow_http = true` in the config.
 .venv/bin/pytest -q
 ```
 
-The test suite (~120 tests) covers unit tests for every service and one
+The test suite (~150 tests) covers unit tests for every service and one
 integration smoke test per feature area against a real in-process
 `RNS.Reticulum` instance.
 

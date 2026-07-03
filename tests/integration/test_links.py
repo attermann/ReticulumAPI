@@ -108,6 +108,74 @@ async def test_open_without_awaiting_returns_link_id(client):
 
 
 @pytest.mark.asyncio
+async def test_open_accepts_destination_hash_alias(client):
+    """destination_hash is an alias for identity_hash on link.open (WS + REST).
+
+    RNS.Identity.recall() accepts both identity and destination hashes, so
+    clients pasting a destination hash directly (e.g. from an announce
+    they've observed) shouldn't have to translate it first.
+    """
+    ident = await (await client.post("/identities")).json()
+    aspect = secrets.token_hex(3)
+
+    # REST: destination_hash alone is accepted.
+    r = await client.post(
+        "/links",
+        json={
+            "destination_hash": ident["hash"],
+            "app_name": "rnsapi_test",
+            "aspects": [aspect],
+            "await_established": False,
+            "path_lookup_timeout": 0.1,
+        },
+    )
+    assert r.status == 201, await r.text()
+    link_id = (await r.json())["link_id"]
+    await client.delete(f"/links/{link_id}")
+
+    # REST: both spellings together -> 400.
+    r = await client.post(
+        "/links",
+        json={
+            "identity_hash": ident["hash"],
+            "destination_hash": ident["hash"],
+            "app_name": "rnsapi_test",
+            "aspects": [aspect],
+            "await_established": False,
+        },
+    )
+    assert r.status == 400
+
+    # REST: neither spelling -> 400.
+    r = await client.post(
+        "/links",
+        json={"app_name": "rnsapi_test", "aspects": [aspect]},
+    )
+    assert r.status == 400
+
+    # WS: destination_hash alone is accepted.
+    ws = await client.ws_connect("/ws")
+    try:
+        await _wait_event(ws, "auth.session.attached")
+        await ws.send_json(
+            {
+                "type": "link.open",
+                "id": "op-dh",
+                "destination_hash": ident["hash"],
+                "app_name": "rnsapi_test",
+                "aspects": [aspect],
+                "await_established": False,
+                "path_lookup_timeout": 0.1,
+            }
+        )
+        ev = await _wait_event(ws, "link.open.result")
+        assert ev["id"] == "op-dh"
+        assert ev["link_id"]
+    finally:
+        await ws.close()
+
+
+@pytest.mark.asyncio
 async def test_open_await_established_times_out(client):
     ident = await (await client.post("/identities")).json()
     r = await client.post(

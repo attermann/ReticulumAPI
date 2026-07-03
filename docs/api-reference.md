@@ -18,7 +18,7 @@ protocols share the same authentication, session model, and permission set.
 - [Links](#links) — `/links/*`, all Link lifecycle events
 - [Resources](#resources) — `/links/{id}/resources`, `/resources/*`, progress + download
 
-### Endpoint index
+### REST Endpoint Index
 
 | Method | Path                                | Feature area           |
 | ------ | ----------------------------------- | ---------------------- |
@@ -58,6 +58,117 @@ protocols share the same authentication, session model, and permission set.
 | GET    | `/resources/{transfer_id}`          | Resources              |
 | GET    | `/resources/{transfer_id}/data`     | Resources              |
 | DELETE | `/resources/{transfer_id}`          | Resources              |
+
+### WebSocket Endpoint / Event Index
+
+All WebSocket traffic flows through the single `GET /ws` endpoint. Frames
+are JSON objects with a `type` field. The tables below list every
+**inbound** message type a client can send and every **outbound** event
+type the server may emit. All server-emitted events are session-scoped
+unless the "Scope" column says otherwise.
+
+**Client → server (inbound messages)**
+
+| `type`                                | Feature area           | Reply / effect                                                            |
+| ------------------------------------- | ---------------------- | ------------------------------------------------------------------------- |
+| `auth`                                | Sessions               | First-frame authentication (only accepted when auth is enabled)           |
+| `ping`                                | Sessions               | Reply: `pong`. Refreshes the session's `last_seen_at`.                    |
+| `session.info`                        | Sessions               | Reply: `session.info` with session metadata                               |
+| `auth.logout`                         | Sessions               | Reply: `auth.logout.result`; then closes the connection                   |
+| `identity.create`                     | Identities             | Broadcasts `identity.created` to the session                              |
+| `identity.list`                       | Identities             | Reply: `identity.list.result`                                             |
+| `session.active_identity.get`         | Identities             | Reply: `session.active_identity.info`                                     |
+| `session.active_identity.set`         | Identities             | Broadcasts `session.active_identity.changed`                              |
+| `session.active_identity.clear`       | Identities             | Broadcasts `session.active_identity.changed`                              |
+| `destination.list`                    | Destinations           | Reply: `destination.list.result`                                          |
+| `destination.add`                     | Destinations           | Broadcasts `destination.added`                                            |
+| `destination.remove`                  | Destinations           | Broadcasts `destination.removed`                                          |
+| `announce.send`                       | Announces              | Reply: `announce.send.result`; broadcasts `announce.sent` globally        |
+| `paths.query`                         | Paths                  | Reply: `paths.query.result`                                               |
+| `paths.request`                       | Paths                  | Fires `path.request.sent`; reply: `paths.request.result` when the wait ends |
+| `packets.listen`                      | Packets                | Reply: `packets.listen.result`; subsequent packets fire `packet.received` |
+| `packets.unlisten`                    | Packets                | Reply: `packets.unlisten.result`                                          |
+| `packets.listeners`                   | Packets                | Reply: `packets.listeners.result`                                         |
+| `packets.send`                        | Packets                | Reply: `packets.send.result`; fires `packet.sent` and later `packet.receipt.*` |
+| `link.open`                           | Links                  | Reply: `link.open.result`; fires `link.established` when ACTIVE           |
+| `link.close`                          | Links                  | Reply: `link.close.result`; fires `link.closed`                           |
+| `link.identify`                       | Links                  | Reply: `link.identify.result`                                             |
+| `link.send`                           | Links                  | Reply: `link.send.result`; fires `link.data.sent`                         |
+| `link.request`                        | Links                  | Reply: `link.request.result` (ack); later `link.request.response` / `link.request.failed` |
+| `link.status`                         | Links                  | Reply: `link.status.result`                                               |
+| `link.list`                           | Links                  | Reply: `link.list.result`                                                 |
+| `resource.send`                       | Resources              | Reply: `resource.send.result`; fires `resource.started`, then progress / completion events |
+| `resource.list`                       | Resources              | Reply: `resource.list.result`                                             |
+| `resource.status`                     | Resources              | Reply: `resource.status.result`                                           |
+| `resource.cancel`                     | Resources              | Reply: `resource.cancel.result`; fires `resource.failed`                  |
+| `resource.policy`                     | Resources              | Reply: `resource.policy.result`                                           |
+
+**Server → client (outbound events)**
+
+| `type`                                | Feature area           | Scope        | When                                                                    |
+| ------------------------------------- | ---------------------- | ------------ | ----------------------------------------------------------------------- |
+| `error`                               | any                    | targeted     | Handler-level failure (missing field, unknown type, internal error)     |
+| `pong`                                | Sessions               | targeted     | Reply to `ping`                                                         |
+| `auth.session.attached`               | Sessions               | targeted     | WS successfully attached to a session                                   |
+| `auth.session.connected`              | Sessions               | session      | A new WS attached to the session                                        |
+| `auth.session.disconnected`           | Sessions               | session      | A WS detached from the session                                          |
+| `auth.session.created`                | Sessions               | session      | A new session was created via `/auth/login`                             |
+| `auth.session.rejected`               | Sessions               | targeted     | Auth handshake failed; connection is about to be closed                 |
+| `auth.session.ended`                  | Sessions               | session      | Session ended (logout, expiry, or explicit teardown)                    |
+| `auth.logout.result`                  | Sessions               | targeted     | Reply to `auth.logout`                                                  |
+| `session.info`                        | Sessions               | targeted     | Reply to `session.info` command                                         |
+| `identity.created`                    | Identities             | session      | A new identity was created                                              |
+| `identity.list.result`                | Identities             | targeted     | Reply to `identity.list`                                                |
+| `session.active_identity.info`        | Identities             | targeted     | Reply to `session.active_identity.get`                                  |
+| `session.active_identity.changed`     | Identities             | session      | Active identity set or cleared                                          |
+| `destination.list.result`             | Destinations           | targeted     | Reply to `destination.list`                                             |
+| `destination.added`                   | Destinations           | session      | A destination was registered                                            |
+| `destination.removed`                 | Destinations           | session      | A destination was deregistered                                          |
+| `announce.send.result`                | Announces              | targeted     | Reply to `announce.send`                                                |
+| `announce.sent`                       | Announces              | **global**   | This daemon just sent an announce                                       |
+| `announce.received`                   | Announces              | **global**   | RNS delivered an announce to this node                                  |
+| `paths.query.result`                  | Paths                  | targeted     | Reply to `paths.query`                                                  |
+| `paths.request.result`                | Paths                  | targeted     | Reply to `paths.request` (found or timed out)                           |
+| `path.request.sent`                   | Paths                  | session      | This session initiated a path request                                   |
+| `packets.listen.result`               | Packets                | targeted     | Reply to `packets.listen`                                               |
+| `packets.unlisten.result`             | Packets                | targeted     | Reply to `packets.unlisten`                                             |
+| `packets.listeners.result`            | Packets                | targeted     | Reply to `packets.listeners`                                            |
+| `packets.send.result`                 | Packets                | targeted     | Reply to `packets.send`                                                 |
+| `packet.received`                     | Packets                | session      | A packet arrived on a listened destination                              |
+| `packet.sent`                         | Packets                | session      | This session sent a packet                                              |
+| `packet.receipt.delivered`            | Packets                | session      | A delivery proof arrived                                                |
+| `packet.receipt.failed`               | Packets                | session      | The receipt timed out or failed                                         |
+| `link.open.result`                    | Links                  | targeted     | Reply to `link.open`                                                    |
+| `link.close.result`                   | Links                  | targeted     | Reply to `link.close`                                                   |
+| `link.identify.result`                | Links                  | targeted     | Reply to `link.identify`                                                |
+| `link.send.result`                    | Links                  | targeted     | Reply to `link.send`                                                    |
+| `link.request.result`                 | Links                  | targeted     | Ack for `link.request` (the response arrives later)                     |
+| `link.status.result`                  | Links                  | targeted     | Reply to `link.status`                                                  |
+| `link.list.result`                    | Links                  | targeted     | Reply to `link.list`                                                    |
+| `link.established`                    | Links                  | session      | Link reached ACTIVE                                                     |
+| `link.closed`                         | Links                  | session      | Link torn down (any reason)                                             |
+| `link.disconnected`                   | Links                  | session      | Link closed by remote (fires alongside `link.closed`)                   |
+| `link.remote_identified`              | Links                  | session      | Remote identified themselves via `link.identify`                        |
+| `link.data.received`                  | Links                  | session      | Inbound packet arrived on the link                                      |
+| `link.data.sent`                      | Links                  | session      | Outbound packet dispatched on the link                                  |
+| `link.request.response`               | Links                  | session      | Response arrived for a previous `link.request`                          |
+| `link.request.failed`                 | Links                  | session      | A previous `link.request` failed                                        |
+| `resource.send.result`                | Resources              | targeted     | Reply to `resource.send`                                                |
+| `resource.list.result`                | Resources              | targeted     | Reply to `resource.list`                                                |
+| `resource.status.result`              | Resources              | targeted     | Reply to `resource.status`                                              |
+| `resource.cancel.result`              | Resources              | targeted     | Reply to `resource.cancel`                                              |
+| `resource.policy.result`              | Resources              | targeted     | Reply to `resource.policy`                                              |
+| `resource.started`                    | Resources              | session      | A transfer began (inbound or outbound)                                  |
+| `resource.progress`                   | Resources              | session      | Periodic progress update (throttled)                                    |
+| `resource.completed`                  | Resources              | session      | Inbound transfer finished; includes `download_url` (+ inline `data_b64` if small) |
+| `resource.sent`                       | Resources              | session      | Outbound transfer finished successfully                                 |
+| `resource.failed`                     | Resources              | session      | Transfer failed, was cancelled, or timed out                            |
+
+**Scope legend:**
+
+- **targeted** — delivered only to the WS connection that sent the triggering request.
+- **session** — fanned out to every WS connection currently attached to the requesting session.
+- **global** — broadcast to every WS connection on the daemon, regardless of session.
 
 ## Common conventions
 
@@ -711,6 +822,10 @@ Open a Link (or reuse an existing one). Request:
 }
 ```
 
+- `identity_hash` **or** `destination_hash` — exactly one is required.
+  Both are 32-hex strings resolved via `RNS.Identity.recall()`, which
+  accepts either shape. `destination_hash` is convenient when the client
+  is pasting a hash straight from an announce it observed.
 - `auto_identify` — if `true`, the daemon calls `link.identify(session's
   active identity)` after the link becomes ACTIVE.
 - `await_established` — if `true` (default), the response is returned only

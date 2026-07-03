@@ -33,6 +33,7 @@ async def rest_open_link(request: web.Request) -> web.Response:
         return web.json_response({"error": "invalid_json"}, status=400)
 
     identity_hash = body.get("identity_hash")
+    destination_hash = body.get("destination_hash")
     app_name = body.get("app_name")
     aspects = body.get("aspects", [])
     auto_identify = bool(body.get("auto_identify", False))
@@ -40,8 +41,12 @@ async def rest_open_link(request: web.Request) -> web.Response:
     establishment_timeout = float(body.get("establishment_timeout", 15.0))
     path_lookup_timeout = float(body.get("path_lookup_timeout", 15.0))
 
-    if not isinstance(identity_hash, str):
-        return web.json_response({"error": "identity_hash required"}, status=400)
+    if identity_hash is not None and not isinstance(identity_hash, str):
+        return web.json_response({"error": "identity_hash must be a string"}, status=400)
+    if destination_hash is not None and not isinstance(destination_hash, str):
+        return web.json_response({"error": "destination_hash must be a string"}, status=400)
+    if identity_hash is None and destination_hash is None:
+        return web.json_response({"error": "identity_hash or destination_hash required"}, status=400)
     if not isinstance(app_name, str):
         return web.json_response({"error": "app_name required"}, status=400)
     if not isinstance(aspects, list):
@@ -51,6 +56,7 @@ async def rest_open_link(request: web.Request) -> web.Response:
         result = await svc.open_link(
             session,
             identity_hash=identity_hash,
+            destination_hash=destination_hash,
             app_name=app_name,
             aspects=aspects,
             auto_identify=auto_identify,
@@ -158,7 +164,8 @@ async def ws_open(conn, msg: dict) -> None:
     try:
         result = await svc.open_link(
             conn.session,
-            identity_hash=msg.get("identity_hash", ""),
+            identity_hash=msg.get("identity_hash"),
+            destination_hash=msg.get("destination_hash"),
             app_name=msg.get("app_name", ""),
             aspects=msg.get("aspects", []),
             auto_identify=bool(msg.get("auto_identify", False)),
