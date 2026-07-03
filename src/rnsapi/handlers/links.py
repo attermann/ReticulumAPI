@@ -18,7 +18,13 @@ from __future__ import annotations
 
 from aiohttp import web
 
-from ..rns.links import LinkError, LinksService
+import asyncio
+import logging
+
+from ..rns.links import LinkError, LinksService, _link_snapshot, link_error_reason
+
+
+log = logging.getLogger(__name__)
 
 
 # ---------- REST ----------
@@ -158,25 +164,122 @@ async def rest_link_request(request: web.Request) -> web.Response:
 
 
 async def ws_open(conn, msg: dict) -> None:
+    """WS `link.open` — always async.
+
+    The WebSocket is inherently async, so blocking a reply until the link
+    reaches ACTIVE gains nothing that the client can't already get by
+    watching for `link.established`. Instead:
+
+    1. Run the pre-flight (validation, identity resolve, cache check,
+       Destination construction) synchronously. If it raises, reply with
+       `{type: "error", ...}` on this handler.
+    2. Send an immediate `link.open.result` ack carrying the computed
+       `link_id`. This unblocks the handler loop so the client can queue
+       further messages while establishment is in flight.
+    3. Kick off the establishment continuation as a background task. It
+       emits `link.open.phase` events at each checkpoint, then a terminal
+       `link.established` (via the wired RNS callback) or `link.open.failed`
+       event, all echoing the client-provided `id`.
+
+    `await_established` is intentionally ignored on WS — the reply is
+    always the ack, never the terminal snapshot.
+    """
     if conn.session is None:
         return
     svc: LinksService = conn.app["links"]
+    client_id = msg.get("id")
+    session = conn.session
+    hub = conn.app["hub"]
+
     try:
-        result = await svc.open_link(
-            conn.session,
+        entry, is_reused = svc._prepare_open_link(
+            session,
             identity_hash=msg.get("identity_hash"),
             destination_hash=msg.get("destination_hash"),
             app_name=msg.get("app_name", ""),
             aspects=msg.get("aspects", []),
-            auto_identify=bool(msg.get("auto_identify", False)),
-            await_established=bool(msg.get("await_established", True)),
-            establishment_timeout=float(msg.get("establishment_timeout", 15.0)),
-            path_lookup_timeout=float(msg.get("path_lookup_timeout", 15.0)),
+            client_id=client_id,
         )
     except LinkError as e:
-        await conn.send_json({"type": "error", "error": str(e), "id": msg.get("id")})
+        await conn.send_json({"type": "error", "error": str(e), "id": client_id})
         return
-    await conn.send_json({"type": "link.open.result", "id": msg.get("id"), **result})
+
+    # Immediate ack — includes the computed link_id so the client can start
+    # correlating phase / terminal events right away.
+    prelim_snapshot = _link_snapshot(entry.link, entry.destination_hash, entry.aspect)
+    await conn.send_json(
+        {
+            "type": "link.open.result",
+            "id": client_id,
+            "sent": True,
+            "reused": is_reused,
+            **prelim_snapshot,
+        }
+    )
+
+    auto_identify = bool(msg.get("auto_identify", False))
+    establishment_timeout = float(msg.get("establishment_timeout", 15.0))
+    path_lookup_timeout = float(msg.get("path_lookup_timeout", 15.0))
+
+    async def _on_phase(phase: str) -> None:
+        await hub.send_session(
+            session.id,
+            {
+                "type": "link.open.phase",
+                "session_id": session.id,
+                "id": client_id,
+                "link_id": entry.destination_hash.hex(),
+                "destination_hash": entry.destination_hash.hex(),
+                "aspect": entry.aspect,
+                "phase": phase,
+            },
+        )
+
+    async def _run_continuation() -> None:
+        try:
+            await svc._continue_open_link(
+                session,
+                entry,
+                is_reused=is_reused,
+                auto_identify=auto_identify,
+                await_established=True,
+                establishment_timeout=establishment_timeout,
+                path_lookup_timeout=path_lookup_timeout,
+                on_phase=_on_phase,
+            )
+            # Success: `link.established` was already emitted by the wired
+            # RNS callback (with the echoed client id).
+        except LinkError as e:
+            await hub.send_session(
+                session.id,
+                {
+                    "type": "link.open.failed",
+                    "session_id": session.id,
+                    "id": client_id,
+                    "link_id": entry.destination_hash.hex(),
+                    "destination_hash": entry.destination_hash.hex(),
+                    "aspect": entry.aspect,
+                    "reason": link_error_reason(e),
+                    "detail": str(e),
+                },
+            )
+        except Exception:
+            log.exception("link.open continuation failed for %s", entry.destination_hash.hex())
+            await hub.send_session(
+                session.id,
+                {
+                    "type": "link.open.failed",
+                    "session_id": session.id,
+                    "id": client_id,
+                    "link_id": entry.destination_hash.hex(),
+                    "destination_hash": entry.destination_hash.hex(),
+                    "aspect": entry.aspect,
+                    "reason": "internal",
+                    "detail": "internal error",
+                },
+            )
+
+    asyncio.create_task(_run_continuation())
 
 
 async def ws_close(conn, msg: dict) -> None:

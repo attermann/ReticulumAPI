@@ -141,6 +141,117 @@ async def test_callback_wiring_fires_events(rnsapi_home, rns_instance):
 
 
 @pytest.mark.asyncio
+async def test_close_never_emits_link_disconnected(rnsapi_home, rns_instance):
+    """`link.closed` carries `teardown_reason`; the redundant
+    `link.disconnected` event has been removed."""
+    session = _new_session()
+    hub = WSHub()
+    conn = _FakeConn(session)
+    hub.register(conn)
+    svc = LinksService(hub, IdentityService(rnsapi_home))
+
+    class _FakeLink:
+        status = 0x04  # CLOSED
+        mtu = 500
+        mdu = 400
+        # Simulate a remote-initiated close.
+        teardown_reason = getattr(__import__("RNS").Link, "DESTINATION_CLOSED", None)
+        def __init__(self):
+            self.callbacks: dict[str, object] = {}
+        def set_link_established_callback(self, cb): self.callbacks["est"] = cb
+        def set_link_closed_callback(self, cb):      self.callbacks["closed"] = cb
+        def set_packet_callback(self, cb):           self.callbacks["packet"] = cb
+        def set_remote_identified_callback(self, cb): self.callbacks["ident"] = cb
+        def get_remote_identity(self): return None
+
+    link = _FakeLink()
+    dest_hash = bytes(secrets.token_bytes(16))
+    entry = _LinkEntry(link, dest_hash, "rnsapi_test.dc", "rnsapi_test", ["dc"])
+    session.open_links[dest_hash] = entry
+
+    AsyncBridge.set_main_loop(asyncio.get_running_loop())
+    try:
+        svc._wire_callbacks(session, entry)
+        link.callbacks["closed"](link)
+
+        for _ in range(30):
+            await asyncio.sleep(0.02)
+            if any(e.get("type") == "link.closed" for e in conn.sent):
+                break
+
+        types = [e.get("type") for e in conn.sent]
+        assert "link.closed" in types
+        assert "link.disconnected" not in types
+        closed = next(e for e in conn.sent if e["type"] == "link.closed")
+        # teardown_reason on link.closed conveys the info that
+        # link.disconnected used to.
+        assert closed["teardown_reason"] == "destination_closed"
+    finally:
+        AsyncBridge.clear_main_loop()
+
+
+@pytest.mark.asyncio
+async def test_link_established_echoes_open_client_id(rnsapi_home, rns_instance):
+    """A `link.established` fired after `link.open` should carry the client
+    id set on the entry — later re-establishment (STALE→ACTIVE) does not
+    re-echo it."""
+    session = _new_session()
+    hub = WSHub()
+    conn = _FakeConn(session)
+    hub.register(conn)
+    svc = LinksService(hub, IdentityService(rnsapi_home))
+
+    class _FakeLink:
+        status = 0x02  # ACTIVE
+        mtu = 500
+        mdu = 400
+        teardown_reason = None
+        def __init__(self):
+            self.callbacks: dict[str, object] = {}
+        def set_link_established_callback(self, cb): self.callbacks["est"] = cb
+        def set_link_closed_callback(self, cb):      self.callbacks["closed"] = cb
+        def set_packet_callback(self, cb):           self.callbacks["packet"] = cb
+        def set_remote_identified_callback(self, cb): self.callbacks["ident"] = cb
+        def get_remote_identity(self): return None
+
+    link = _FakeLink()
+    dest_hash = bytes(secrets.token_bytes(16))
+    entry = _LinkEntry(
+        link, dest_hash, "rnsapi_test.est", "rnsapi_test", ["est"],
+        open_client_id="op-xyz",
+    )
+    session.open_links[dest_hash] = entry
+
+    AsyncBridge.set_main_loop(asyncio.get_running_loop())
+    try:
+        svc._wire_callbacks(session, entry)
+
+        # First establishment: echoes the open client id.
+        link.callbacks["est"](link)
+        for _ in range(30):
+            await asyncio.sleep(0.02)
+            if any(e.get("type") == "link.established" for e in conn.sent):
+                break
+
+        est = next(e for e in conn.sent if e["type"] == "link.established")
+        assert est["id"] == "op-xyz"
+        assert entry.open_client_id is None  # consumed
+
+        # Subsequent lifecycle transition (e.g. STALE→ACTIVE) does not re-echo.
+        conn.sent.clear()
+        link.callbacks["est"](link)
+        for _ in range(30):
+            await asyncio.sleep(0.02)
+            if any(e.get("type") == "link.established" for e in conn.sent):
+                break
+
+        est2 = next(e for e in conn.sent if e["type"] == "link.established")
+        assert est2.get("id") is None
+    finally:
+        AsyncBridge.clear_main_loop()
+
+
+@pytest.mark.asyncio
 async def test_snapshot_shape(rns_instance):
     class _StubLink:
         status = 0x02

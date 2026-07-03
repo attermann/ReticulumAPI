@@ -146,8 +146,7 @@ unless the "Scope" column says otherwise.
 | `link.status.result`                  | Links                  | targeted     | Reply to `link.status`                                                  |
 | `link.list.result`                    | Links                  | targeted     | Reply to `link.list`                                                    |
 | `link.established`                    | Links                  | session      | Link reached ACTIVE                                                     |
-| `link.closed`                         | Links                  | session      | Link torn down (any reason)                                             |
-| `link.disconnected`                   | Links                  | session      | Link closed by remote (fires alongside `link.closed`)                   |
+| `link.closed`                         | Links                  | session      | Link torn down (any reason; check `teardown_reason` to distinguish local vs remote) |
 | `link.remote_identified`              | Links                  | session      | Remote identified themselves via `link.identify`                        |
 | `link.data.received`                  | Links                  | session      | Inbound packet arrived on the link                                      |
 | `link.data.sent`                      | Links                  | session      | Outbound packet dispatched on the link                                  |
@@ -920,7 +919,7 @@ Errors:
 
 | Inbound `type`     | Reply / event                                        |
 | ------------------ | ---------------------------------------------------- |
-| `link.open`        | reply `link.open.result`                             |
+| `link.open`        | immediate ack `link.open.result` (`sent: true`) + `link.open.phase` events during establishment + terminal `link.established` or `link.open.failed` |
 | `link.close`       | reply `link.close.result`                            |
 | `link.identify`    | reply `link.identify.result`                         |
 | `link.send`        | reply `link.send.result` + event `link.data.sent`    |
@@ -928,11 +927,37 @@ Errors:
 | `link.status`      | reply `link.status.result`                           |
 | `link.list`        | reply `link.list.result`                             |
 
+**`link.open` on WS is fully async.** Unlike the REST endpoint, the WS
+handler ignores `await_established` in the request. Flow:
+
+1. Pre-flight (validation, identity resolve, cache check, destination
+   construction) runs synchronously. Failures produce a `{type: "error"}`
+   reply with the client-provided `id`.
+2. Immediate `link.open.result` ack with `sent: true`, `reused`, the
+   computed `link_id`, `destination_hash`, `aspect`, and preliminary
+   `status`.
+3. `link.open.phase` events fire at each establishment checkpoint
+   (`finding_path` → `establishing_link` → `identifying` when
+   `auto_identify=true`), skipping phases that don't apply (e.g. no
+   `finding_path` when a path is already cached).
+4. Terminal event: either `link.established` (the link reached ACTIVE)
+   or `link.open.failed` with a stable `reason` code:
+   `no_known_identity`, `link_establishment_timed_out`, `identify_failed`,
+   `invalid_request`, or `internal` — plus a free-form `detail`.
+
+All four terminal/phase events echo the client-provided `id` from the
+originating `link.open`.
+
 ### Server-emitted link events (session-scoped)
 
-- `link.established`      — link reached ACTIVE
-- `link.closed`           — link torn down (any reason)
-- `link.disconnected`     — link closed by remote (fires alongside `link.closed` when the teardown reason is not `initiator_closed`)
+- `link.open.phase`       — progress event during a WS `link.open`;
+  payload includes `id`, `phase`, `link_id`, `destination_hash`, `aspect`.
+- `link.open.failed`      — a WS `link.open` continuation failed; carries
+  `id`, `reason`, `detail`, `link_id`, `destination_hash`, `aspect`.
+- `link.established`      — link reached ACTIVE (echoes `id` from the
+  originating WS `link.open`, if any)
+- `link.closed`           — link torn down (any reason); `teardown_reason`
+  distinguishes local vs remote initiation
 - `link.remote_identified` — remote sent us their identity via `link.identify`
 - `link.data.received`    — an inbound packet arrived on the link
 - `link.data.sent`        — we sent an outbound packet on the link

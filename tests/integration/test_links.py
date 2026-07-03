@@ -164,7 +164,7 @@ async def test_open_accepts_destination_hash_alias(client):
                 "destination_hash": ident["hash"],
                 "app_name": "rnsapi_test",
                 "aspects": [aspect],
-                "await_established": False,
+                "establishment_timeout": 0.2,
                 "path_lookup_timeout": 0.1,
             }
         )
@@ -223,12 +223,13 @@ async def test_ws_open_reuses_link_and_dispatches_status(client):
                 "identity_hash": ident["hash"],
                 "app_name": "rnsapi_test",
                 "aspects": [aspect],
-                "await_established": False,
+                "establishment_timeout": 0.2,
                 "path_lookup_timeout": 0.1,
             }
         )
         ev = await _wait_event(ws, "link.open.result")
         assert ev["id"] == "op1"
+        assert ev["sent"] is True
         link_id = ev["link_id"]
 
         # link.list
@@ -245,6 +246,80 @@ async def test_ws_open_reuses_link_and_dispatches_status(client):
         await ws.send_json({"type": "link.close", "id": "cl", "link_id": link_id})
         ev = await _wait_event(ws, "link.close.result")
         assert ev["ok"] is True
+    finally:
+        await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_ws_open_is_fully_async_with_phase_and_failure_events(client):
+    """WS link.open never blocks. The immediate reply is an ack that carries
+    the computed link_id; phase events fire during establishment; on
+    failure a session-scoped `link.open.failed` event is emitted with the
+    echoed client id and a categorized reason."""
+    ident = await (await client.post("/identities")).json()
+    aspect = secrets.token_hex(3)
+    ws = await client.ws_connect("/ws")
+    try:
+        await _wait_event(ws, "auth.session.attached")
+        await ws.send_json(
+            {
+                "type": "link.open",
+                "id": "op-async",
+                "identity_hash": ident["hash"],
+                "app_name": "rnsapi_test",
+                "aspects": [aspect],
+                # tight timeouts so the background continuation completes
+                # within the test window
+                "establishment_timeout": 0.2,
+                "path_lookup_timeout": 0.1,
+            }
+        )
+
+        # Immediate ack — arrives before establishment finishes.
+        ack = await _wait_event(ws, "link.open.result")
+        assert ack["id"] == "op-async"
+        assert ack["sent"] is True
+        assert ack["reused"] is False
+        assert ack["link_id"]
+        assert ack["status"] in ("PENDING", "HANDSHAKE", "STALE", "CLOSED", "ACTIVE")
+        link_id = ack["link_id"]
+
+        # At least one phase event fires (finding_path when no path exists).
+        ev = await _wait_event(ws, "link.open.phase", timeout=2)
+        assert ev["id"] == "op-async"
+        assert ev["phase"] in ("finding_path", "establishing_link")
+        assert ev["link_id"] == link_id
+
+        # Terminal failure event (no peer → establishment times out).
+        failed = await _wait_event(ws, "link.open.failed", timeout=3)
+        assert failed["id"] == "op-async"
+        assert failed["link_id"] == link_id
+        assert failed["reason"] == "link_establishment_timed_out"
+        assert "timed out" in failed["detail"]
+    finally:
+        await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_ws_open_returns_error_on_preflight_failure(client):
+    """Pre-flight failures (bad hash, unknown identity, etc.) still return a
+    synchronous `error` reply — they never enter the async pipeline, so
+    `link.open.failed` is not appropriate."""
+    ws = await client.ws_connect("/ws")
+    try:
+        await _wait_event(ws, "auth.session.attached")
+        await ws.send_json(
+            {
+                "type": "link.open",
+                "id": "op-bad",
+                "identity_hash": "not-hex",
+                "app_name": "rnsapi_test",
+                "aspects": ["x"],
+            }
+        )
+        ev = await _wait_event(ws, "error")
+        assert ev["id"] == "op-bad"
+        assert "invalid hash" in ev["error"]
     finally:
         await ws.close()
 

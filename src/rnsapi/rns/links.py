@@ -5,9 +5,11 @@ Adapted from MeshChatX's rns_link_manager.py. Differences:
 - Cache is per-session (session.open_links keyed on destination_hash bytes)
   rather than a global module-level dict. All lifecycle events fanout via
   hub.send_session so every connection in the session sees them.
-- All seven lifecycle events are surfaced: link.established, link.closed,
-  link.remote_identified, link.data.received, link.data.sent, link.proof,
-  link.disconnected (emitted alongside link.closed with a teardown_reason).
+- Lifecycle events are surfaced: link.established, link.closed,
+  link.remote_identified, link.data.received, link.data.sent, link.proof.
+  `link.closed` carries `teardown_reason` — clients that want to
+  distinguish local from remote initiation key off that field rather
+  than a separate `link.disconnected` event.
 - Identity resolution tries the local IdentityService first, then falls
   back to RNS.Identity.recall.
 
@@ -21,7 +23,7 @@ import base64
 import logging
 import re
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 import RNS
 
@@ -54,6 +56,21 @@ _TEARDOWN_REASON_MAP = {
     getattr(RNS.Link, "INITIATOR_CLOSED", None): "initiator_closed",
     getattr(RNS.Link, "DESTINATION_CLOSED", None): "destination_closed",
 }
+
+
+def link_error_reason(err: "LinkError | str") -> str:
+    """Categorize a LinkError message into a stable reason code that clients
+    can key off of. Used by `link.open.failed`."""
+    msg = str(err).lower()
+    if "no known identity" in msg:
+        return "no_known_identity"
+    if "link establishment timed out" in msg:
+        return "link_establishment_timed_out"
+    if "identify failed" in msg or "session has no active identity" in msg or "load session identity" in msg:
+        return "identify_failed"
+    if "invalid hash" in msg or "app_name" in msg or "aspects" in msg or "not both" in msg or "required" in msg:
+        return "invalid_request"
+    return "internal"
 
 
 class LinkError(Exception):
@@ -96,15 +113,27 @@ def _link_snapshot(link, destination_hash: bytes, aspect: str) -> dict:
 class _LinkEntry:
     """Bookkeeping for one Link owned by a session."""
 
-    __slots__ = ("link", "destination_hash", "aspect", "app_name", "sub_aspects", "identified")
+    __slots__ = (
+        "link",
+        "destination_hash",
+        "aspect",
+        "app_name",
+        "sub_aspects",
+        "identified",
+        "open_client_id",
+    )
 
-    def __init__(self, link, destination_hash, aspect, app_name, sub_aspects, identified=False):
+    def __init__(self, link, destination_hash, aspect, app_name, sub_aspects, identified=False, open_client_id=None):
         self.link = link
         self.destination_hash = destination_hash
         self.aspect = aspect
         self.app_name = app_name
         self.sub_aspects = tuple(sub_aspects)
         self.identified = identified
+        # Echoed on `link.established` when this specific open_link call
+        # succeeds, so a WS client that issued `link.open` with `id: X` can
+        # correlate the terminal success event to its request.
+        self.open_client_id = open_client_id
 
 
 class LinksService:
@@ -158,22 +187,26 @@ class LinksService:
 
     # ---------- open ----------
 
-    async def open_link(
+    def _prepare_open_link(
         self,
         session: "Session",
         *,
-        identity_hash: Optional[str] = None,
-        destination_hash: Optional[str] = None,
+        identity_hash: Optional[str],
+        destination_hash: Optional[str],
         app_name: str,
         aspects: list[str],
-        auto_identify: bool = False,
-        await_established: bool = True,
-        establishment_timeout: float = 15.0,
-        path_lookup_timeout: float = 15.0,
-    ) -> dict:
+        client_id: Any = None,
+    ) -> tuple[_LinkEntry, bool]:
+        """Pre-flight: validate, resolve identity, construct destination, cache
+        check. Returns (entry, is_reused). Never blocks on the network.
+
+        Called both by the REST/full-pipeline `open_link()` and by the WS
+        async path so the handler can send an immediate ack that carries the
+        real `link_id`.
+        """
         # Accept either identity_hash or destination_hash as the lookup key.
         # RNS.Identity.recall() resolves both to the target identity, and the
-        # webconsole workflow paste destination hashes rather than identity
+        # webconsole workflow pastes destination hashes rather than identity
         # hashes — so both spellings are first-class.
         source_hash = identity_hash if identity_hash is not None else destination_hash
         if identity_hash is not None and destination_hash is not None:
@@ -192,8 +225,6 @@ class LinksService:
         if target_identity is None:
             raise LinkError("no known identity for hash — issue an announce or path request first")
 
-        # Construct the OUT destination and compute its hash. If the session
-        # already has an ACTIVE link at this destination, reuse it.
         destination = RNS.Destination(
             target_identity, RNS.Destination.OUT, RNS.Destination.SINGLE, app_name, *aspects
         )
@@ -202,15 +233,51 @@ class LinksService:
 
         existing = session.open_links.get(dest_hash)
         if existing is not None and getattr(existing.link, "status", None) == RNS.Link.ACTIVE:
-            # Optionally identify on the reused link.
-            if auto_identify and not existing.identified:
-                await self._identify(session, existing)
-            return {"reused": True, **_link_snapshot(existing.link, dest_hash, aspect_str)}
+            existing.open_client_id = client_id
+            return existing, True
 
-        # Optionally kick off a path request (RNS.Link will do this itself
-        # when established, but a proactive lookup helps establishment succeed
-        # faster in tests with no announces).
+        link = RNS.Link(destination)
+        entry = _LinkEntry(
+            link, dest_hash, aspect_str, app_name, aspects,
+            identified=False, open_client_id=client_id,
+        )
+        session.open_links[dest_hash] = entry
+        # Wire callbacks now so `link.established` fires the moment RNS
+        # signals ACTIVE, even if the caller aborts the continuation.
+        self._wire_callbacks(session, entry)
+        return entry, False
+
+    async def _continue_open_link(
+        self,
+        session: "Session",
+        entry: _LinkEntry,
+        *,
+        is_reused: bool,
+        auto_identify: bool,
+        await_established: bool,
+        establishment_timeout: float,
+        path_lookup_timeout: float,
+        on_phase: Optional[Callable[[str], Awaitable[None]]] = None,
+    ) -> dict:
+        """Async continuation of `_prepare_open_link`: path lookup, wait for
+        ACTIVE, optional auto-identify. Emits phase events via `on_phase`.
+        Raises LinkError on establishment failure.
+        """
+        dest_hash = entry.destination_hash
+        aspect_str = entry.aspect
+        link = entry.link
+
+        if is_reused:
+            if auto_identify and not entry.identified:
+                if on_phase is not None:
+                    await on_phase("identifying")
+                await self._identify(session, entry)
+            return {"reused": True, **_link_snapshot(link, dest_hash, aspect_str)}
+
+        # Path lookup (skipped when we already have one cached).
         if not RNS.Transport.has_path(dest_hash):
+            if on_phase is not None:
+                await on_phase("finding_path")
             try:
                 RNS.Transport.request_path(dest_hash)
             except Exception:
@@ -219,18 +286,17 @@ class LinksService:
             while not RNS.Transport.has_path(dest_hash) and time.monotonic() < deadline:
                 await asyncio.sleep(_POLL_INTERVAL_S)
 
-        link = RNS.Link(destination)
-        entry = _LinkEntry(link, dest_hash, aspect_str, app_name, aspects, identified=False)
-        session.open_links[dest_hash] = entry
-
-        # Wire callbacks — every one uses AsyncBridge to bounce onto the loop.
-        self._wire_callbacks(session, entry)
+        if on_phase is not None:
+            await on_phase("establishing_link")
 
         if not await_established:
             return {"reused": False, "awaited": False, **_link_snapshot(link, dest_hash, aspect_str)}
 
         deadline = time.monotonic() + establishment_timeout
-        while getattr(link, "status", None) != RNS.Link.ACTIVE and time.monotonic() < deadline:
+        while (
+            getattr(link, "status", None) not in (RNS.Link.ACTIVE, RNS.Link.CLOSED)
+            and time.monotonic() < deadline
+        ):
             await asyncio.sleep(_POLL_INTERVAL_S)
 
         if getattr(link, "status", None) != RNS.Link.ACTIVE:
@@ -242,9 +308,48 @@ class LinksService:
             raise LinkError("link establishment timed out")
 
         if auto_identify:
+            if on_phase is not None:
+                await on_phase("identifying")
             await self._identify(session, entry)
 
         return {"reused": False, "awaited": True, **_link_snapshot(link, dest_hash, aspect_str)}
+
+    async def open_link(
+        self,
+        session: "Session",
+        *,
+        identity_hash: Optional[str] = None,
+        destination_hash: Optional[str] = None,
+        app_name: str,
+        aspects: list[str],
+        auto_identify: bool = False,
+        await_established: bool = True,
+        establishment_timeout: float = 15.0,
+        path_lookup_timeout: float = 15.0,
+        on_phase: Optional[Callable[[str], Awaitable[None]]] = None,
+        client_id: Any = None,
+    ) -> dict:
+        """Full pipeline: pre-flight + establishment. Used by REST callers
+        and by unit tests. The WS handler splits these two stages so it can
+        ack early — see `ws_open` in handlers/links.py."""
+        entry, is_reused = self._prepare_open_link(
+            session,
+            identity_hash=identity_hash,
+            destination_hash=destination_hash,
+            app_name=app_name,
+            aspects=aspects,
+            client_id=client_id,
+        )
+        return await self._continue_open_link(
+            session,
+            entry,
+            is_reused=is_reused,
+            auto_identify=auto_identify,
+            await_established=await_established,
+            establishment_timeout=establishment_timeout,
+            path_lookup_timeout=path_lookup_timeout,
+            on_phase=on_phase,
+        )
 
     def _wire_callbacks(self, session: "Session", entry: _LinkEntry) -> None:
         session_id = session.id
@@ -255,15 +360,25 @@ class LinksService:
             AsyncBridge.run_async(self._hub.send_session(session_id, event))
 
         def _on_established(link):
+            # Consume the client id of the open_link call that created this
+            # entry so subsequent lifecycle events (STALE→ACTIVE transitions,
+            # for example) don't re-echo it.
+            client_id = entry.open_client_id
+            entry.open_client_id = None
             _fire(
                 {
                     "type": "link.established",
                     "session_id": session_id,
+                    "id": client_id,
                     **_link_snapshot(link, dest_hash, aspect),
                 }
             )
 
         def _on_closed(link):
+            # `teardown_reason` on the payload lets clients distinguish
+            # locally-initiated closes (`initiator_closed`) from remote
+            # tear-downs (`timeout`, `destination_closed`) — no separate
+            # `link.disconnected` event needed.
             _fire(
                 {
                     "type": "link.closed",
@@ -271,18 +386,6 @@ class LinksService:
                     **_link_snapshot(link, dest_hash, aspect),
                 }
             )
-            # `disconnected` is emitted for downstream clients that want a
-            # semantic distinction from a locally-initiated `link.closed`.
-            reason = _teardown_reason(link)
-            if reason and reason != "initiator_closed":
-                _fire(
-                    {
-                        "type": "link.disconnected",
-                        "session_id": session_id,
-                        "reason": reason,
-                        **_link_snapshot(link, dest_hash, aspect),
-                    }
-                )
             # Evict from the session cache (may already be popped by close()).
             entry_cur = session.open_links.get(dest_hash)
             if entry_cur is entry:
