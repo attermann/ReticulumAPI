@@ -16,40 +16,48 @@ protocols share the same authentication, session model, and permission set.
 - [Paths](#paths) — `/paths`, `/paths/request`
 - [Packets](#packets) — `/packets/listen`, `/packets/send`, receipt events
 - [Links](#links) — `/links/*`, all Link lifecycle events
+- [Resources](#resources) — `/links/{id}/resources`, `/resources/*`, progress + download
 
 ### Endpoint index
 
-| Method | Path                                | Introduced in |
-| ------ | ----------------------------------- | ------------- |
-| GET    | `/health`                           | Phase 1       |
-| GET    | `/version`                          | Phase 1       |
-| GET    | `/ws`                               | Phase 1 / 2   |
-| POST   | `/auth/login`                       | Phase 2       |
-| POST   | `/auth/logout`                      | Phase 2       |
-| GET    | `/session`                          | Phase 2       |
-| POST   | `/identities`                       | Phase 3       |
-| GET    | `/identities`                       | Phase 3       |
-| GET    | `/identities/{hash}`                | Phase 3       |
-| GET    | `/session/active-identity`          | Phase 3       |
-| PUT    | `/session/active-identity`          | Phase 3       |
-| DELETE | `/session/active-identity`          | Phase 3       |
-| GET    | `/destinations`                     | Phase 3       |
-| POST   | `/destinations`                     | Phase 3       |
-| DELETE | `/destinations/{hash}`              | Phase 3       |
-| POST   | `/announce`                         | Phase 4       |
-| GET    | `/paths`                            | Phase 5       |
-| POST   | `/paths/request`                    | Phase 5       |
-| POST   | `/packets/listen`                   | Phase 6       |
-| DELETE | `/packets/listen/{hash}`            | Phase 6       |
-| GET    | `/packets/listen`                   | Phase 6       |
-| POST   | `/packets/send`                     | Phase 6       |
-| POST   | `/links`                            | Phase 7       |
-| GET    | `/links`                            | Phase 7       |
-| GET    | `/links/{id}`                       | Phase 7       |
-| DELETE | `/links/{id}`                       | Phase 7       |
-| POST   | `/links/{id}/identify`              | Phase 7       |
-| POST   | `/links/{id}/data`                  | Phase 7       |
-| POST   | `/links/{id}/request`               | Phase 7       |
+| Method | Path                                | Feature area           |
+| ------ | ----------------------------------- | ---------------------- |
+| GET    | `/health`                           | Network                |
+| GET    | `/version`                          | Network                |
+| GET    | `/ws`                               | Network / Sessions     |
+| POST   | `/auth/login`                       | Sessions               |
+| POST   | `/auth/logout`                      | Sessions               |
+| GET    | `/session`                          | Sessions               |
+| POST   | `/identities`                       | Identities             |
+| GET    | `/identities`                       | Identities             |
+| GET    | `/identities/{hash}`                | Identities             |
+| GET    | `/session/active-identity`          | Identities             |
+| PUT    | `/session/active-identity`          | Identities             |
+| DELETE | `/session/active-identity`          | Identities             |
+| GET    | `/destinations`                     | Destinations           |
+| POST   | `/destinations`                     | Destinations           |
+| DELETE | `/destinations/{hash}`              | Destinations           |
+| POST   | `/announce`                         | Announces              |
+| GET    | `/paths`                            | Paths                  |
+| POST   | `/paths/request`                    | Paths                  |
+| POST   | `/packets/listen`                   | Packets                |
+| DELETE | `/packets/listen/{hash}`            | Packets                |
+| GET    | `/packets/listen`                   | Packets                |
+| POST   | `/packets/send`                     | Packets                |
+| POST   | `/links`                            | Links                  |
+| GET    | `/links`                            | Links                  |
+| GET    | `/links/{id}`                       | Links                  |
+| DELETE | `/links/{id}`                       | Links                  |
+| POST   | `/links/{id}/identify`              | Links                  |
+| POST   | `/links/{id}/data`                  | Links                  |
+| POST   | `/links/{id}/request`               | Links                  |
+| POST   | `/links/{id}/resources`             | Resources              |
+| POST   | `/links/{id}/resources/policy`      | Resources              |
+| GET    | `/links/{id}/resources`             | Resources              |
+| GET    | `/resources`                        | Resources              |
+| GET    | `/resources/{transfer_id}`          | Resources              |
+| GET    | `/resources/{transfer_id}/data`     | Resources              |
+| DELETE | `/resources/{transfer_id}`          | Resources              |
 
 ## Common conventions
 
@@ -136,9 +144,9 @@ session's token is returned with `auth_required: false, is_anonymous: true`.
 
 ### `POST /auth/logout`
 
-Revokes the current session, closes its WebSocket connections, and (in later
-phases) tears down its owned destinations and links. Requires a valid bearer
-token unless auth is disabled.
+Revokes the current session, closes its WebSocket connections, and tears
+down its owned destinations, links, packet listeners, and in-flight
+resources. Requires a valid bearer token unless auth is disabled.
 
 Response `200 OK`:
 
@@ -249,8 +257,8 @@ identity does not exist.
 ## Active identity
 
 Every session has at most one active identity. It is used implicitly by
-`POST /destinations` and later phases (announces, path requests, packets,
-links).
+`POST /destinations`, announces, path requests, packet sends, and link
+opens.
 
 ### `GET /session/active-identity`
 
@@ -338,7 +346,7 @@ Deregisters the destination from RNS. `404 Not Found` if the destination
 isn't owned by this session. Emits `{"type":"destination.removed",
 "destination": {...}}` to the session's WS.
 
-## WS message types (Phase 3)
+## WS message types (identities & destinations)
 
 | Inbound `type`                         | Reply / event                                         |
 | -------------------------------------- | ----------------------------------------------------- |
@@ -611,7 +619,7 @@ Response `200 OK`:
 }
 ```
 
-### WS message types (Phase 6)
+### WS message types (packets)
 
 | Inbound `type`         | Reply / event                                                     |
 | ---------------------- | ----------------------------------------------------------------- |
@@ -793,7 +801,7 @@ Errors:
 - `408 Request Timeout` — the request awaited but no response arrived.
 - `502 Bad Gateway` — the remote reported the request failed.
 
-### WS message types (Phase 7)
+### WS message types (links)
 
 | Inbound `type`     | Reply / event                                        |
 | ------------------ | ---------------------------------------------------- |
@@ -813,9 +821,148 @@ Errors:
 - `link.remote_identified` — remote sent us their identity via `link.identify`
 - `link.data.received`    — an inbound packet arrived on the link
 - `link.data.sent`        — we sent an outbound packet on the link
-- `link.proof`            — reserved for future proof-tracking events (see Phase 6 `packet.receipt.*` for the current shape)
+- `link.proof`            — reserved for future proof-tracking events (see `packet.receipt.*` for the current shape)
 - `link.request.response` — an RPC response arrived
 - `link.request.failed`   — an RPC request failed
 
 Each event payload includes `session_id`, `link_id`, `destination_hash`,
 and `aspect`. See `src/rnsapi/rns/links.py` for the exact schema.
+
+## Resources
+
+RNS Resources are the reliable-transport primitive on top of a Link:
+segmentation, compression, request-window flow control, and integrity
+checks for payloads larger than a single Packet's MDU.
+
+**Direction:** both send and receive, over both REST and WebSocket.
+
+**Streaming:** RNS accumulates all parts in memory then writes to disk
+once assembly is complete — the daemon **cannot** expose partial received
+bytes during transfer. What it does expose:
+
+- **Live progress** via `resource.progress` events on WS (throttled).
+- **Streamed download** via `GET /resources/{id}/data` once complete
+  (aiohttp's `web.FileResponse` chunks the reply).
+- **Optional inline `data_b64`** in the `resource.completed` event when
+  the received bytes are smaller than `[resources] max_inline_bytes`
+  (default 64 KB).
+
+**Auto-accept:** every session-owned Link accepts incoming resources by
+default (`RNS.Link.ACCEPT_ALL`). Opt out per-link with
+`POST /links/{id}/resources/policy`.
+
+**Retention:** completed transfer temp files live under
+`~/.config/rnsapi/resources/` and are automatically deleted after
+`[resources] retention_seconds` (default 3600). `DELETE
+/resources/{transfer_id}` removes one immediately. Session teardown
+removes them all.
+
+### `POST /links/{id}/resources`
+
+Send a resource. The request body is streamed to a temp file, then
+`RNS.Resource(open(temp),link)` starts the transfer. **The Link must be
+ACTIVE** — 409 Conflict otherwise.
+
+Query parameters:
+
+| Param            | Default   | Meaning                                                                 |
+| ---------------- | --------- | ----------------------------------------------------------------------- |
+| `await_complete` | `false`   | If `true`, block until the transfer completes.                          |
+| `timeout`        | 300       | Await timeout in seconds.                                               |
+| `auto_compress`  | `true`    | Passed through to `RNS.Resource`.                                       |
+| `metadata`       |           | URL-encoded JSON to attach to the resource.                             |
+
+Request:
+
+```
+POST /links/abcd.../resources?await_complete=false
+Content-Type: application/octet-stream
+<raw bytes ...>
+```
+
+Response `201 Created` (fire-and-forget):
+
+```json
+{
+  "awaited": false,
+  "transfer_id": "abc123...",
+  "session_id": "...",
+  "direction": "out",
+  "link_id": "abcd...",
+  "status": "QUEUED",
+  "total_size": 5000,
+  "bytes_transferred": 0,
+  "progress": 0.0,
+  "created_at": 1720000000.0,
+  "metadata": null
+}
+```
+
+Or `200 OK` when `await_complete=true` and the transfer reached COMPLETE.
+`408 Request Timeout` on await timeout. `502 Bad Gateway` on FAILED /
+CORRUPT. `409 Conflict` when the link isn't ACTIVE. `404 Not Found` when
+the link isn't owned by this session.
+
+### `POST /links/{id}/resources/policy`
+
+Toggle whether the link accepts incoming resource advertisements.
+
+```json
+{"accept": true}
+```
+
+Response `200 OK` mirrors the request plus `link_id`.
+
+### `GET /links/{id}/resources` — list transfers on this link
+
+```json
+{"resources": [ { transfer_snapshot }, ... ]}
+```
+
+### `GET /resources` — list all session transfers
+
+Same shape.
+
+### `GET /resources/{transfer_id}` — one transfer's metadata
+
+Includes `download_url` when the transfer is inbound and COMPLETE.
+
+### `GET /resources/{transfer_id}/data`
+
+**Streamed download** of the assembled bytes via aiohttp `FileResponse`.
+
+- `200 OK` with `Content-Type: application/octet-stream`,
+  `Content-Disposition: attachment; filename="<transfer_id>"`.
+- `404 Not Found` if the transfer doesn't exist, isn't owned by this
+  session, is outbound, or isn't yet COMPLETE.
+- `410 Gone` if the temp file has been swept.
+
+### `DELETE /resources/{transfer_id}`
+
+Cancels the transfer if in flight, deletes the temp file if complete, and
+removes the transfer from session state. Fires `resource.failed` on WS.
+
+### WS message types (resources)
+
+| Inbound `type`         | Reply                                                            |
+| ---------------------- | ---------------------------------------------------------------- |
+| `resource.send`        | `resource.send.result`. Small-file send via `data_b64`.          |
+| `resource.list`        | `resource.list.result`                                           |
+| `resource.status`      | `resource.status.result`                                         |
+| `resource.cancel`      | `resource.cancel.result`                                         |
+| `resource.policy`      | `resource.policy.result`                                         |
+
+### Server-emitted resource events (session-scoped)
+
+- `resource.started` — a transfer began (inbound or outbound)
+- `resource.progress` — periodic progress update (throttled to
+  `[resources] progress_throttle_ms` and `progress_throttle_pct`)
+- `resource.completed` — inbound transfer finished successfully. Includes
+  `download_url`; also includes `data_b64` if the received size is
+  ≤ `max_inline_bytes`.
+- `resource.sent` — outbound transfer finished successfully
+- `resource.failed` — status FAILED / CORRUPT / cancelled
+
+Every event payload includes `session_id`, `transfer_id`, `link_id`,
+`direction`, `status`, `total_size`, `bytes_transferred`, `progress`,
+`metadata`, and (for terminal events) `completed_at`.

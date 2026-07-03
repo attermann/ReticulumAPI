@@ -1,4 +1,4 @@
-"""Phase 6 smoke test: packet listener + packet send over the REST/WS API."""
+"""Smoke test: packet listener + packet send over the REST/WS API."""
 from __future__ import annotations
 
 import asyncio

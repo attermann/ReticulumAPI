@@ -5,7 +5,7 @@ Adapted from MeshChatX's rns_link_manager.py. Differences:
 - Cache is per-session (session.open_links keyed on destination_hash bytes)
   rather than a global module-level dict. All lifecycle events fanout via
   hub.send_session so every connection in the session sees them.
-- All seven Phase 7 events are surfaced: link.established, link.closed,
+- All seven lifecycle events are surfaced: link.established, link.closed,
   link.remote_identified, link.data.received, link.data.sent, link.proof,
   link.disconnected (emitted alongside link.closed with a teardown_reason).
 - Identity resolution tries the local IdentityService first, then falls
@@ -113,6 +113,15 @@ class LinksService:
     def __init__(self, hub: "WSHub", identities: "IdentityService | None" = None):
         self._hub = hub
         self._identities = identities
+        self._resources = None  # set via set_resources_service() after both services exist
+
+    def set_resources_service(self, resources_svc) -> None:
+        """Called by build_app after both services are constructed.
+
+        Kept as a setter to avoid a circular import between links.py and
+        resources.py.
+        """
+        self._resources = resources_svc
 
     # ---------- identity resolution ----------
 
@@ -310,6 +319,13 @@ class LinksService:
             entry.link.set_remote_identified_callback(_on_remote_identified)
         except Exception:
             log.debug("set_remote_identified_callback not supported")
+
+        # Wire Resource send/receive callbacks onto this Link.
+        if self._resources is not None:
+            try:
+                self._resources.attach_link(session, entry.link, dest_hash, aspect)
+            except Exception:
+                log.exception("resources.attach_link failed for link %s", dest_hash.hex())
 
     # ---------- identify ----------
 

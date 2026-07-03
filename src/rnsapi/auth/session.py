@@ -6,9 +6,9 @@ set of WebSocket connections currently attached. Long-lived resources like
 destinations and links are cleaned up when a session ends so a client can't
 leak them by disappearing.
 
-Later phases hang their own state off the Session instance (see the
-`owned_destinations`, `open_links`, `packet_listeners`, and `pending_receipts`
-fields below).
+Feature modules hang their own state off the Session instance (see the
+`owned_destinations`, `open_links`, `packet_listeners`, `pending_receipts`,
+`active_transfers`, and `link_resource_policy` fields below).
 """
 from __future__ import annotations
 
@@ -43,6 +43,11 @@ class Session:
     packet_listeners: set[bytes] = field(default_factory=set)
     pending_receipts: dict[str, Any] = field(default_factory=dict)
 
+    # Resource transfers indexed by opaque transfer_id.
+    active_transfers: dict[str, Any] = field(default_factory=dict)
+    # Per-Link accept flag for inbound resources.
+    link_resource_policy: dict[bytes, dict] = field(default_factory=dict)
+
     ws_connections: set["WSConnection"] = field(default_factory=set)
 
     def touch(self) -> None:
@@ -57,12 +62,13 @@ class SessionRegistry:
         self._by_id: dict[str, Session] = {}
         self._anon: Session | None = None
         self._reaper_task: asyncio.Task | None = None
-        # Cleanup callbacks registered by later phases (identity/destination/link
-        # services). Each takes a Session and is awaited during expiry/logout.
+        # Cleanup callbacks registered by feature services (identity /
+        # destination / link / packet / resource). Each takes a Session and is
+        # awaited during expiry/logout.
         self._cleanup_hooks: list[Any] = []
 
     def register_cleanup(self, coro_fn) -> None:
-        """Later phases add resource-teardown callbacks here."""
+        """Feature services register resource-teardown callbacks here."""
         self._cleanup_hooks.append(coro_fn)
 
     def create(self, is_anonymous: bool = False) -> Session:

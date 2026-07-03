@@ -1,4 +1,4 @@
-"""Phase 2 smoke test: bearer-token auth for REST + first-frame auth for WS."""
+"""Smoke test: bearer-token auth for REST + first-frame auth for WS."""
 from __future__ import annotations
 
 import asyncio

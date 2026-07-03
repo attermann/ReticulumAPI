@@ -1,4 +1,4 @@
-"""Phase 7 smoke tests for the Link endpoints.
+"""Smoke tests for the Link endpoints.
 
 RNS Link handshake requires transport-layer packet exchange between two
 endpoints, which does not happen in an in-process test with no interfaces.

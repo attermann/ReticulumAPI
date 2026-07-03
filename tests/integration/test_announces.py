@@ -1,4 +1,4 @@
-"""Phase 4 smoke test: /announce endpoint + global announce fanout."""
+"""Smoke test: /announce endpoint + global announce fanout."""
 from __future__ import annotations
 
 import asyncio

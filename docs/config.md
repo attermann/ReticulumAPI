@@ -56,9 +56,6 @@ rnsapid --print-cert-fingerprint
 | `session_max_lifetime`       | `86400` | Maximum session lifetime regardless of activity.               |
 | `ws_auth_frame_timeout`      | `5`     | Seconds a WS client has to send its first-frame auth message.  |
 
-Session management is implemented in Phase 2. In Phase 1, auth is a no-op
-regardless of this setting.
-
 ### `[rns]`
 
 | Key          | Default | Meaning                                                             |
@@ -93,3 +90,15 @@ regardless of this setting.
 | `request_default_timeout` | `30`       | Default timeout for `link.request`.            |
 | `max_ws_message_bytes`    | `1048576`  | Reject WS frames larger than this.             |
 | `max_packet_bytes`        | `65535`    | Reject Packet payloads larger than this.       |
+
+### `[resources]`
+
+| Key                       | Default       | Meaning                                                                   |
+| ------------------------- | ------------- | ------------------------------------------------------------------------- |
+| `temp_dir`                | `resources`   | Directory (relative to storage root) for uploaded/received resource files. |
+| `retention_seconds`       | `3600`        | Delete completed transfer files older than this.                          |
+| `sweep_interval_seconds`  | `300`         | How often the cleanup sweep runs.                                         |
+| `max_inline_bytes`        | `65536`       | Inline `data_b64` in `resource.completed` events when the received size is at most this. |
+| `progress_throttle_ms`    | `250`         | Minimum wall-clock interval between successive `resource.progress` events. |
+| `progress_throttle_pct`   | `1.0`         | Minimum percentage-point change to trigger a progress event.              |
+| `default_auto_accept`     | `true`        | Auto-accept incoming resources on every session-owned Link by default.    |

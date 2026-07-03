@@ -1,8 +1,8 @@
 """aiohttp app factory and lifecycle for rnsapid.
 
 The single aiohttp Application here serves REST + WebSocket on the same port.
-Phase-specific handler modules register their routes and their WS message
-handlers with the app during `build_app`. The WS entry point (`/ws`) runs the
+Each handler module under `handlers/` registers its own REST routes and WS
+message-type handlers during `build_app`. The WS entry point (`/ws`) runs the
 first-frame auth handshake and then routes inbound frames via `ws_router`.
 """
 from __future__ import annotations
@@ -21,12 +21,13 @@ from .auth.middleware import auth_middleware
 from .auth.session import SessionRegistry
 from .config import Config
 from .handlers import (
-    phase2_auth,
-    phase3_identity,
-    phase4_announce,
-    phase5_paths,
-    phase6_packets,
-    phase7_links,
+    announce as announce_handlers,
+    auth as auth_handlers,
+    identity as identity_handlers,
+    links as link_handlers,
+    packets as packet_handlers,
+    paths as path_handlers,
+    resources as resource_handlers,
 )
 from .paths import StoragePaths
 from .rns.announces import AnnounceService
@@ -35,6 +36,7 @@ from .rns.identities import IdentityService
 from .rns.links import LinksService
 from .rns.packets import PacketsService
 from .rns.paths import PathsService
+from .rns.resources import ResourcesService
 from .rns.service import RNSService
 from .tls import build_ssl_context, cert_fingerprint_sha256, ensure_self_signed
 from .ws.connection import WSConnection
@@ -166,6 +168,8 @@ def build_app(
     paths_svc = PathsService(config, hub)
     packets_svc = PacketsService(hub, identities)
     links_svc = LinksService(hub, identities)
+    resources_svc = ResourcesService(hub, config, storage)
+    links_svc.set_resources_service(resources_svc)
 
     app = web.Application(
         client_max_size=config.limits.max_ws_message_bytes,
@@ -182,13 +186,15 @@ def build_app(
     app["paths"] = paths_svc
     app["packets"] = packets_svc
     app["links"] = links_svc
+    app["resources"] = resources_svc
     app["rns_service"] = rns_service if rns_service is not None else (RNSService(config) if start_rns else None)
     app["_start_rns"] = start_rns and app["rns_service"] is not None
 
     # Session cleanup teardowns owned resources for the ending session.
-    # Links are torn down first (they may hold references to destinations),
-    # then packet callbacks / receipts are cleared, then destinations are
-    # deregistered.
+    # Resources go first (they reference Links); then Links (they hold
+    # references to destinations); then packet callbacks / receipts; then
+    # destinations are deregistered.
+    sessions.register_cleanup(resources_svc.cleanup_session)
     sessions.register_cleanup(links_svc.cleanup_session)
     sessions.register_cleanup(packets_svc.cleanup_session)
     sessions.register_cleanup(destinations.cleanup_session)
@@ -197,12 +203,13 @@ def build_app(
     app.router.add_get("/version", _version)
     app.router.add_get("/ws", _ws_handler)
 
-    phase2_auth.register(app)
-    phase3_identity.register(app)
-    phase4_announce.register(app)
-    phase5_paths.register(app)
-    phase6_packets.register(app)
-    phase7_links.register(app)
+    auth_handlers.register(app)
+    identity_handlers.register(app)
+    announce_handlers.register(app)
+    path_handlers.register(app)
+    packet_handlers.register(app)
+    link_handlers.register(app)
+    resource_handlers.register(app)
 
     async def _on_startup(_app):
         AsyncBridge.set_main_loop(asyncio.get_running_loop())
@@ -219,10 +226,12 @@ def build_app(
             import RNS
             paths_svc.attach(RNS.Reticulum.get_instance())
         announces.start()
+        await resources_svc.start()
         sessions.start_reaper()
 
     async def _on_cleanup(_app):
         await sessions.stop_reaper()
+        await resources_svc.stop()
         announces.stop()
         if _app["_start_rns"] and _app["rns_service"] is not None:
             _app["rns_service"].stop()

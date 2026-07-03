@@ -1,4 +1,4 @@
-"""Phase 3 smoke test: identities and destinations end-to-end."""
+"""Smoke test: identities and destinations end-to-end."""
 from __future__ import annotations
 
 import asyncio

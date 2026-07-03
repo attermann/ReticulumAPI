@@ -1,4 +1,4 @@
-"""Phase 5 smoke test: /paths query + /paths/request endpoints."""
+"""Smoke test: /paths query + /paths/request endpoints."""
 from __future__ import annotations
 
 import asyncio

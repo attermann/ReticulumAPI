@@ -6,8 +6,8 @@
 - ws.paths.request                                       — asynchronous WS path request
 
 There is no server-emitted `path.request.received` event; RNS does not
-expose a public listener for incoming path-request packets. This is a
-documented Phase 5 limitation.
+expose a public listener for incoming path-request packets. See the
+API reference for the documented limitation.
 """
 from __future__ import annotations
 

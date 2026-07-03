@@ -5,7 +5,7 @@ Provides three delivery scopes:
 - send_session(id, event)   — every connection attached to one session
 - send_connection(c, event) — one connection
 
-Every phase-specific service class pulls the hub off the app dict and calls
+Every feature service class pulls the hub off the app dict and calls
 one of these to push events at clients.
 """
 from __future__ import annotations

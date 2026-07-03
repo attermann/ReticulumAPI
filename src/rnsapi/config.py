@@ -74,6 +74,17 @@ class LimitsConfig:
 
 
 @dataclass
+class ResourcesConfig:
+    temp_dir: str = "resources"
+    retention_seconds: int = 3600
+    sweep_interval_seconds: int = 300
+    max_inline_bytes: int = 65536
+    progress_throttle_ms: int = 250
+    progress_throttle_pct: float = 1.0
+    default_auto_accept: bool = True
+
+
+@dataclass
 class Config:
     network: NetworkConfig = field(default_factory=NetworkConfig)
     tls: TlsConfig = field(default_factory=TlsConfig)
@@ -82,6 +93,7 @@ class Config:
     storage: StorageConfig = field(default_factory=StorageConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     limits: LimitsConfig = field(default_factory=LimitsConfig)
+    resources: ResourcesConfig = field(default_factory=ResourcesConfig)
 
 
 DEFAULT_CONFIG_TEXT = """\
@@ -136,6 +148,24 @@ link_establish_timeout = 15
 request_default_timeout = 30
 max_ws_message_bytes = 1048576
 max_packet_bytes = 65535
+
+[resources]
+# Directory (relative to storage root) for received/uploaded resource files.
+temp_dir = resources
+# Auto-cleanup of completed transfers older than this many seconds.
+retention_seconds = 3600
+# How often the cleanup sweep runs.
+sweep_interval_seconds = 300
+# Inline base64-encode the received bytes in the resource.completed event when
+# the resource is this small or smaller. Larger resources require a REST
+# download via GET /resources/{id}/data.
+max_inline_bytes = 65536
+# Progress events coalesced to at most this rate.
+progress_throttle_ms = 250
+progress_throttle_pct = 1.0
+# Auto-accept every incoming Resource advertisement on every session-owned Link.
+# Per-link override available via POST /links/{id}/resources/policy.
+default_auto_accept = true
 """
 
 
@@ -235,6 +265,20 @@ def load(path: Path) -> Config:
             request_default_timeout=_get_int(s, "request_default_timeout", cfg.limits.request_default_timeout),
             max_ws_message_bytes=_get_int(s, "max_ws_message_bytes", cfg.limits.max_ws_message_bytes),
             max_packet_bytes=_get_int(s, "max_packet_bytes", cfg.limits.max_packet_bytes),
+        )
+
+    if parser.has_section("resources"):
+        s = parser["resources"]
+        pct_raw = s.get("progress_throttle_pct", "").strip()
+        pct = float(pct_raw) if pct_raw else cfg.resources.progress_throttle_pct
+        cfg.resources = ResourcesConfig(
+            temp_dir=_get_str(s, "temp_dir", cfg.resources.temp_dir),
+            retention_seconds=_get_int(s, "retention_seconds", cfg.resources.retention_seconds),
+            sweep_interval_seconds=_get_int(s, "sweep_interval_seconds", cfg.resources.sweep_interval_seconds),
+            max_inline_bytes=_get_int(s, "max_inline_bytes", cfg.resources.max_inline_bytes),
+            progress_throttle_ms=_get_int(s, "progress_throttle_ms", cfg.resources.progress_throttle_ms),
+            progress_throttle_pct=pct,
+            default_auto_accept=_get_bool(s, "default_auto_accept", cfg.resources.default_auto_accept),
         )
 
     validate(cfg)

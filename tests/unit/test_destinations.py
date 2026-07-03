@@ -18,10 +18,10 @@ def test_create_registers_destination(rnsapi_home, rns_instance):
     identity, _ = identity_svc.create()
     svc = DestinationService()
     session = _FakeSession()
-    destination, info = svc.create(session, identity, "in", "single", "rnsapi_test", ["phase3", "one"])
+    destination, info = svc.create(session, identity, "in", "single", "rnsapi_test", ["unit", "one"])
     assert destination.hash in session.owned_destinations
     assert info.app_name == "rnsapi_test"
-    assert info.aspects == ("phase3", "one")
+    assert info.aspects == ("unit", "one")
     assert info.direction == "in"
     assert info.type == "single"
     # cleanup
@@ -33,7 +33,7 @@ def test_remove_deregisters(rnsapi_home, rns_instance):
     identity, _ = identity_svc.create()
     svc = DestinationService()
     session = _FakeSession()
-    _, info = svc.create(session, identity, "in", "single", "rnsapi_test", ["phase3", "two"])
+    _, info = svc.create(session, identity, "in", "single", "rnsapi_test", ["unit", "two"])
     svc.remove(session, info.hash_hex)
     assert info.hash_hex not in {h.hex() for h in session.owned_destinations.keys()}
 

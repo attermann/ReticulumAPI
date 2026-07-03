@@ -16,9 +16,10 @@ class StoragePaths:
     identities_dir: Path
     certs_dir: Path
     logs_dir: Path
+    resources_dir: Path
 
     def ensure(self) -> None:
-        for p in (self.root, self.identities_dir, self.certs_dir, self.logs_dir):
+        for p in (self.root, self.identities_dir, self.certs_dir, self.logs_dir, self.resources_dir):
             p.mkdir(parents=True, exist_ok=True)
 
 
@@ -32,4 +33,5 @@ def resolve(root: str | os.PathLike | None = None) -> StoragePaths:
         identities_dir=root / "identities",
         certs_dir=root / "certs",
         logs_dir=root / "logs",
+        resources_dir=root / "resources",
     )

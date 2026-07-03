@@ -38,15 +38,16 @@ WebSocket client can now use every RNS service.
 
 ## Feature surface
 
-| Phase                | Endpoints                                                                       |
-| -------------------- | ------------------------------------------------------------------------------- |
-| 1. Network interface | `/health`, `/version`, `/ws`                                                    |
-| 2. Sessions          | `/auth/login`, `/auth/logout`, `/session`, WS first-frame auth                  |
-| 3. Identities & destinations | `/identities`, `/session/active-identity`, `/destinations`              |
-| 4. Announces         | `/announce`, global announce listener → `announce.received` broadcast           |
-| 5. Paths             | `/paths` (queries), `/paths/request` (awaited)                                  |
-| 6. Packets           | `/packets/listen`, `/packets/send` with receipt tracking                        |
-| 7. Links             | `/links` (open/close/status), `/links/{id}/{data,request,identify}`             |
+| Area                       | Endpoints                                                                       |
+| -------------------------- | ------------------------------------------------------------------------------- |
+| Network interface          | `/health`, `/version`, `/ws`                                                    |
+| Sessions                   | `/auth/login`, `/auth/logout`, `/session`, WS first-frame auth                  |
+| Identities & destinations  | `/identities`, `/session/active-identity`, `/destinations`                      |
+| Announces                  | `/announce`, global announce listener → `announce.received` broadcast           |
+| Paths                      | `/paths` (queries), `/paths/request` (awaited)                                  |
+| Packets                    | `/packets/listen`, `/packets/send` with receipt tracking                        |
+| Links                      | `/links` (open/close/status), `/links/{id}/{data,request,identify}`             |
+| Resources                  | `/links/{id}/resources` (send), `/resources/{id}/data` (streamed download)      |
 
 ## Quickstart
 
@@ -102,8 +103,8 @@ allow_http = true` in the config.
 ```
 
 The test suite (~120 tests) covers unit tests for every service and one
-integration smoke test per phase against a real in-process `RNS.Reticulum`
-instance.
+integration smoke test per feature area against a real in-process
+`RNS.Reticulum` instance.
 
 ## License
 

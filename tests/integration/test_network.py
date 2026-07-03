@@ -1,4 +1,4 @@
-"""Phase 1 smoke test: HTTP + HTTPS listeners serving /health, /version, /ws.
+"""Network smoke test: HTTP + HTTPS listeners serving /health, /version, /ws.
 
 Runs end-to-end against a real aiohttp server. Uses plaintext for HTTP checks
 and a self-signed cert for HTTPS checks (with cert verification disabled — this
