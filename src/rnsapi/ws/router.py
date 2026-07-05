@@ -30,12 +30,14 @@ class WSRouter:
     async def dispatch(self, conn, msg: dict) -> None:
         msg_type = msg.get("type")
         if not isinstance(msg_type, str):
+            log.warning("ws %s frame has missing/non-string 'type' field: %r", conn.id, msg_type)
             await conn.send_json(
                 {"type": "error", "error": "missing_type", "id": msg.get("id")}
             )
             return
         handler = self._handlers.get(msg_type)
         if handler is None:
+            log.warning("ws %s: unknown WS message type %r", conn.id, msg_type)
             await conn.send_json(
                 {
                     "type": "error",
@@ -45,6 +47,7 @@ class WSRouter:
                 }
             )
             return
+        log.debug("ws %s dispatching %s (id=%r)", conn.id, msg_type, msg.get("id"))
         try:
             await handler(conn, msg)
         except Exception:

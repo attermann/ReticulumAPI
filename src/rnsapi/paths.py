@@ -14,6 +14,7 @@ class StoragePaths:
     root: Path
     config_file: Path
     identities_dir: Path
+    default_identity_file: Path
     certs_dir: Path
     logs_dir: Path
     resources_dir: Path
@@ -31,6 +32,9 @@ def resolve(root: str | os.PathLike | None = None) -> StoragePaths:
         root=root,
         config_file=root / "config",
         identities_dir=root / "identities",
+        # Flat file at the root — there's only one, and most apps supply
+        # their own identity via PUT /session/active-identity anyway.
+        default_identity_file=root / "default_identity",
         certs_dir=root / "certs",
         logs_dir=root / "logs",
         resources_dir=root / "resources",

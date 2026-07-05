@@ -27,6 +27,23 @@ from ..rns.links import LinkError, LinksService, _link_snapshot, link_error_reas
 log = logging.getLogger(__name__)
 
 
+def _preliminary_snapshot(dest_hash: bytes, aspect: str) -> dict:
+    """Ack payload for a not-yet-created RNS.Link. Matches `_link_snapshot`'s
+    shape so clients can consume both events interchangeably; status is
+    always PENDING because RNS.Link isn't constructed until the async
+    continuation runs (see rns/links.py:continue_open_link_ws)."""
+    return {
+        "link_id": dest_hash.hex(),
+        "destination_hash": dest_hash.hex(),
+        "aspect": aspect,
+        "status": "PENDING",
+        "mtu": None,
+        "mdu": None,
+        "remote_identity_hash": None,
+        "teardown_reason": None,
+    }
+
+
 # ---------- REST ----------
 
 
@@ -170,16 +187,17 @@ async def ws_open(conn, msg: dict) -> None:
     reaches ACTIVE gains nothing that the client can't already get by
     watching for `link.established`. Instead:
 
-    1. Run the pre-flight (validation, identity resolve, cache check,
-       Destination construction) synchronously. If it raises, reply with
+    1. Run pre-flight validation (identity resolve, destination
+       construction) synchronously. If it raises, reply with
        `{type: "error", ...}` on this handler.
-    2. Send an immediate `link.open.result` ack carrying the computed
-       `link_id`. This unblocks the handler loop so the client can queue
-       further messages while establishment is in flight.
-    3. Kick off the establishment continuation as a background task. It
-       emits `link.open.phase` events at each checkpoint, then a terminal
-       `link.established` (via the wired RNS callback) or `link.open.failed`
-       event, all echoing the client-provided `id`.
+    2. Check for a cached ACTIVE link — if found, ack with `reused: true`
+       and (optionally) auto-identify. No phase events, no continuation.
+    3. Otherwise send an immediate `link.open.result` ack carrying the
+       predicted `link_id` (which is deterministic from the destination
+       hash). Then kick off the establishment continuation as a background
+       task. The continuation does path lookup, emits phase events, THEN
+       creates the RNS.Link — this ordering is what prevents
+       `_on_established` from beating `link.open.phase` to the client.
 
     `await_established` is intentionally ignored on WS — the reply is
     always the ack, never the terminal snapshot.
@@ -192,34 +210,28 @@ async def ws_open(conn, msg: dict) -> None:
     hub = conn.app["hub"]
 
     try:
-        entry, is_reused = svc._prepare_open_link(
+        prepared = svc._prepare_open_link(
             session,
             identity_hash=msg.get("identity_hash"),
             destination_hash=msg.get("destination_hash"),
             app_name=msg.get("app_name", ""),
             aspects=msg.get("aspects", []),
-            client_id=client_id,
         )
     except LinkError as e:
         await conn.send_json({"type": "error", "error": str(e), "id": client_id})
         return
 
-    # Immediate ack — includes the computed link_id so the client can start
-    # correlating phase / terminal events right away.
-    prelim_snapshot = _link_snapshot(entry.link, entry.destination_hash, entry.aspect)
-    await conn.send_json(
-        {
-            "type": "link.open.result",
-            "id": client_id,
-            "sent": True,
-            "reused": is_reused,
-            **prelim_snapshot,
-        }
-    )
-
     auto_identify = bool(msg.get("auto_identify", False))
     establishment_timeout = float(msg.get("establishment_timeout", 15.0))
     path_lookup_timeout = float(msg.get("path_lookup_timeout", 15.0))
+
+    log.info(
+        "session %s link.open received (dest=%s aspect=%s auto_identify=%s)",
+        session.id,
+        prepared.destination_hash.hex(),
+        prepared.aspect,
+        auto_identify,
+    )
 
     async def _on_phase(phase: str) -> None:
         await hub.send_session(
@@ -228,21 +240,77 @@ async def ws_open(conn, msg: dict) -> None:
                 "type": "link.open.phase",
                 "session_id": session.id,
                 "id": client_id,
-                "link_id": entry.destination_hash.hex(),
-                "destination_hash": entry.destination_hash.hex(),
-                "aspect": entry.aspect,
+                "link_id": prepared.destination_hash.hex(),
+                "destination_hash": prepared.destination_hash.hex(),
+                "aspect": prepared.aspect,
                 "phase": phase,
             },
         )
 
+    # Reuse path: ACTIVE link already in cache. No phase events fire; the
+    # client is expected to resolve on `reused: true` in the ack.
+    existing = svc._reuse_active_link(session, prepared.destination_hash)
+    if existing is not None:
+        existing.open_client_id = client_id
+        log.info(
+            "session %s link.open reusing cached ACTIVE link %s",
+            session.id,
+            prepared.destination_hash.hex(),
+        )
+        await conn.send_json(
+            {
+                "type": "link.open.result",
+                "id": client_id,
+                "sent": True,
+                "reused": True,
+                **_link_snapshot(existing.link, existing.destination_hash, existing.aspect),
+            }
+        )
+        if auto_identify and not existing.identified:
+            async def _run_identify() -> None:
+                try:
+                    await _on_phase("identifying")
+                    await svc._identify(session, existing)
+                except LinkError as e:
+                    await hub.send_session(
+                        session.id,
+                        {
+                            "type": "link.open.failed",
+                            "session_id": session.id,
+                            "id": client_id,
+                            "link_id": prepared.destination_hash.hex(),
+                            "destination_hash": prepared.destination_hash.hex(),
+                            "aspect": prepared.aspect,
+                            "reason": link_error_reason(e),
+                            "detail": str(e),
+                        },
+                    )
+            asyncio.create_task(_run_identify())
+        return
+
+    # Not reused: reserve a placeholder slot in session.open_links so
+    # link.list / link.status are truthful the moment the ack goes out.
+    # The RNS.Link is created inside the continuation, *after* phase
+    # events are emitted, so `_on_established` cannot beat them.
+    reserved = svc.reserve_link_slot(session, prepared, client_id=client_id)
+    await conn.send_json(
+        {
+            "type": "link.open.result",
+            "id": client_id,
+            "sent": True,
+            "reused": False,
+            **_preliminary_snapshot(prepared.destination_hash, prepared.aspect),
+        }
+    )
+
     async def _run_continuation() -> None:
         try:
-            await svc._continue_open_link(
+            await svc.continue_open_link_ws(
                 session,
-                entry,
-                is_reused=is_reused,
+                prepared,
+                reserved,
+                client_id=client_id,
                 auto_identify=auto_identify,
-                await_established=True,
                 establishment_timeout=establishment_timeout,
                 path_lookup_timeout=path_lookup_timeout,
                 on_phase=_on_phase,
@@ -256,24 +324,24 @@ async def ws_open(conn, msg: dict) -> None:
                     "type": "link.open.failed",
                     "session_id": session.id,
                     "id": client_id,
-                    "link_id": entry.destination_hash.hex(),
-                    "destination_hash": entry.destination_hash.hex(),
-                    "aspect": entry.aspect,
+                    "link_id": prepared.destination_hash.hex(),
+                    "destination_hash": prepared.destination_hash.hex(),
+                    "aspect": prepared.aspect,
                     "reason": link_error_reason(e),
                     "detail": str(e),
                 },
             )
         except Exception:
-            log.exception("link.open continuation failed for %s", entry.destination_hash.hex())
+            log.exception("link.open continuation failed for %s", prepared.destination_hash.hex())
             await hub.send_session(
                 session.id,
                 {
                     "type": "link.open.failed",
                     "session_id": session.id,
                     "id": client_id,
-                    "link_id": entry.destination_hash.hex(),
-                    "destination_hash": entry.destination_hash.hex(),
-                    "aspect": entry.aspect,
+                    "link_id": prepared.destination_hash.hex(),
+                    "destination_hash": prepared.destination_hash.hex(),
+                    "aspect": prepared.aspect,
                     "reason": "internal",
                     "detail": "internal error",
                 },

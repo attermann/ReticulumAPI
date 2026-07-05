@@ -118,8 +118,8 @@ class SessionRegistry:
         for conn in list(s.ws_connections):
             try:
                 await conn.close(code=4001, message=f"session_{reason}")
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("failed to close ws %s for session %s teardown: %s", conn.id, s.id, e)
 
     def _is_expired(self, s: Session, now: float) -> bool:
         if s.is_anonymous:

@@ -44,7 +44,10 @@ class WSHub:
         )
         for r in results:
             if isinstance(r, Exception):
-                log.debug("ws fanout error: %r", r)
+                # send_json wraps ConnectionResetError silently — anything
+                # that reaches here is worth surfacing at warning so
+                # operators can see delivery failures.
+                log.warning("ws fanout error while dispatching %s event: %r", event.get("type"), r)
 
     async def broadcast(self, event: dict) -> None:
         await self._fanout(list(self._connections), event)

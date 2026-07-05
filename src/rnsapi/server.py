@@ -61,6 +61,40 @@ async def _version(request: web.Request) -> web.Response:
     )
 
 
+@web.middleware
+async def _access_log_middleware(request: web.Request, handler):
+    """Log every REST request at INFO with method, path, status, and duration.
+
+    aiohttp emits a similar line via `aiohttp.access` by default, but the
+    default format hides useful details (method+path are quoted together,
+    duration isn't included, and it fires *after* the response is fully
+    written). This middleware prints a compact one-liner keyed by the
+    rnsapi logger so it sorts alongside our other operation logs.
+
+    Skips the /ws upgrade (it's noisy and belongs to the WS lifecycle log
+    pair) and /health probes (no operator-relevant signal there).
+    """
+    path = request.rel_url.path
+    # /ws is logged as a WS connect/disconnect pair; /health is a probe.
+    quiet = path in ("/ws", "/health")
+    started = asyncio.get_running_loop().time()
+    status = 500
+    try:
+        response = await handler(request)
+        status = getattr(response, "status", 200)
+        return response
+    except web.HTTPException as e:
+        status = e.status
+        raise
+    finally:
+        if not quiet:
+            duration_ms = (asyncio.get_running_loop().time() - started) * 1000
+            log.info(
+                "REST %s %s -> %d (%.1fms) from %s",
+                request.method, path, status, duration_ms, request.remote,
+            )
+
+
 async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
     app = request.app
     config: Config = app["config"]
@@ -72,9 +106,13 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
     await ws.prepare(request)
     conn = WSConnection(ws, app=app)
     hub.register(conn)
-    log.info("ws client connected: %s (conn=%s)", request.remote, conn.id)
+    log.info(
+        "ws connected: conn=%s remote=%s (%d total open)",
+        conn.id, request.remote, len(hub.connections()),
+    )
 
     async def _reject(code: int, reason: str) -> None:
+        log.info("ws rejecting conn=%s remote=%s reason=%s", conn.id, request.remote, reason)
         await conn.send_json({"type": "auth.session.rejected", "reason": reason})
         await ws.close(code=code, message=reason.encode())
 
@@ -94,7 +132,8 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                 return ws
             try:
                 data = json.loads(msg.data)
-            except Exception:
+            except Exception as e:
+                log.warning("ws auth: rejecting %s — invalid JSON in auth frame: %s", request.remote, e)
                 await _reject(4001, "invalid_json")
                 return ws
             if data.get("type") != "auth" or not isinstance(data.get("token"), str):
@@ -112,6 +151,10 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
             session = registry.anonymous()
 
         conn.attach(session)
+        log.info(
+            "ws attached: conn=%s session=%s anonymous=%s",
+            conn.id, session.id, session.is_anonymous,
+        )
         await conn.send_json(
             {
                 "type": "auth.session.attached",
@@ -128,7 +171,8 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
             if frame.type == WSMsgType.TEXT:
                 try:
                     data = json.loads(frame.data)
-                except Exception:
+                except Exception as e:
+                    log.warning("ws conn=%s sent invalid JSON: %s", conn.id, e)
                     await conn.send_json({"type": "error", "error": "invalid_json"})
                     continue
                 if not isinstance(data, dict):
@@ -141,6 +185,7 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
                 log.warning("ws error: %s", ws.exception())
                 break
     finally:
+        session_id = conn.session.id if conn.session is not None else None
         if conn.session is not None:
             await hub.send_session(
                 conn.session.id,
@@ -148,7 +193,10 @@ async def _ws_handler(request: web.Request) -> web.WebSocketResponse:
             )
         conn.detach()
         hub.unregister(conn)
-        log.info("ws client disconnected: %s (conn=%s)", request.remote, conn.id)
+        log.info(
+            "ws disconnected: conn=%s remote=%s session=%s (%d still open)",
+            conn.id, request.remote, session_id, len(hub.connections()),
+        )
     return ws
 
 
@@ -173,7 +221,7 @@ def build_app(
 
     app = web.Application(
         client_max_size=config.limits.max_ws_message_bytes,
-        middlewares=[auth_middleware],
+        middlewares=[_access_log_middleware, auth_middleware],
     )
     app["config"] = config
     app["storage"] = storage

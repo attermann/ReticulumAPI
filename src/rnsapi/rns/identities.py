@@ -65,10 +65,11 @@ class IdentityService:
         for path in sorted(self._storage.identities_dir.glob("*.rid")):
             try:
                 identity = RNS.Identity.from_file(str(path))
-            except Exception:
-                log.warning("could not load identity from %s", path)
+            except Exception as e:
+                log.warning("could not load identity from %s: %s", path, e)
                 continue
             if identity is None:
+                log.warning("RNS.Identity.from_file returned None for %s", path)
                 continue
             results.append(self._info(identity, path))
         return results
@@ -87,3 +88,45 @@ class IdentityService:
 
     def info_for(self, identity: RNS.Identity) -> IdentityInfo:
         return self._info(identity, self._path_for(identity))
+
+    def default_identity(self) -> RNS.Identity:
+        """Return the daemon-wide default identity, creating one if needed.
+
+        Backs the `auto_identify=true` fallback for sessions that haven't
+        set an active identity explicitly (see `LinksService._identify`).
+        MeshChatX has one persistent identity per instance and uses it
+        automatically on `link.identify()`; rnsapid otherwise requires the
+        caller to `PUT /session/active-identity` first, which most simple
+        clients (e.g. the microReticulum webconsole) don't do.
+
+        Stored as a single flat file at
+        `~/.config/rnsapi/default_identity` — deliberately *outside* the
+        multi-file `identities/` directory since there's only ever one,
+        and mixing it with user-managed identities would be misleading.
+        Operators who want to reuse an identity that's already on a peer's
+        ALLOW_LIST can drop or symlink their `.rid` at that path and
+        restart the daemon.
+
+        On first call, if the file doesn't exist yet, a fresh identity is
+        generated and written there. Subsequent calls return the same
+        identity.
+        """
+        path = self._storage.default_identity_file
+        if path.exists():
+            identity = RNS.Identity.from_file(str(path))
+            if identity is not None:
+                log.debug("loaded default identity %s from %s", identity.hexhash, path)
+                return identity
+            log.warning(
+                "default identity file at %s could not be loaded — regenerating (previous file will be overwritten)",
+                path,
+            )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        identity = RNS.Identity()
+        identity.to_file(str(path))
+        log.info(
+            "created default identity %s at %s (used for auto_identify on sessions with no explicit active identity — add this hash to your peer's ALLOW_LIST if it uses one)",
+            identity.hexhash,
+            path,
+        )
+        return identity

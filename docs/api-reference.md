@@ -892,10 +892,20 @@ Send an RPC-style request over the link and **await** the response.
 ```json
 {
   "path": "/echo",
-  "data_b64": "optional base64 payload",
+  "data_b64": "base64 of msgpack-encoded payload (or omit)",
   "timeout": 30
 }
 ```
+
+**Payload encoding.** `data_b64` on this endpoint is the base64 of the
+**msgpack encoding** of your request value — not opaque bytes.
+`rnsapid` msgpack-decodes it to a native Python value before handing it
+to `RNS.Link.request`, which then re-wraps the envelope as
+`msgpack([timestamp, path_hash, data])`. The peer's registered request
+handler therefore receives your value as the *structured* type you
+originally packed. If you actually want to send raw bytes, msgpack-pack
+them as a `bin` value first. This is the same convention MeshChatX
+uses; a peer handler written against MeshChatX will Just Work.
 
 Response `200 OK`:
 
@@ -905,10 +915,14 @@ Response `200 OK`:
   "link_id": "...",
   "path": "/echo",
   "kind": "response",
-  "response_b64": "base64 of the response",
+  "response_b64": "base64 of msgpack-encoded response",
   "size": 42
 }
 ```
+
+`response_b64` is symmetric: it's the base64 of the msgpack encoding of
+whatever the peer's handler returned. Callers msgpack-decode client-side
+to recover the native value.
 
 Errors:
 
@@ -947,6 +961,18 @@ handler ignores `await_established` in the request. Flow:
 
 All four terminal/phase events echo the client-provided `id` from the
 originating `link.open`.
+
+**`auto_identify=true` ordering guarantee.** When `auto_identify=true`
+is requested, `rnsapid` defers the `link.established` event until
+*after* `RNS.Link.identify()` has been called on the underlying link.
+This lets clients treat `link.established` as "the link is up AND the
+peer has been told who we are" — a client that fires a
+`link.request` in direct response to `link.established` cannot race
+the LINKIDENTIFY packet, because RNS orders packets per link and
+identify is queued strictly before any request the client can dispatch.
+Without this suppression, the peer would sometimes see the request
+arrive before it processed identify, causing ALLOW_LIST handlers to
+silently drop the request.
 
 ### Server-emitted link events (session-scoped)
 

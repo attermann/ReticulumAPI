@@ -57,10 +57,16 @@ class GlobalAnnounceHandler:
         is_path_response,
     ):
         # Runs on an RNS-owned thread.
+        dest_hex = destination_hash.hex() if destination_hash else None
+        ident_hex = announced_identity.hexhash if announced_identity is not None else None
+        #log.debug(
+        #    "announce received: destination=%s identity=%s app_data_bytes=%d is_path_response=%s",
+        #    dest_hex, ident_hex, len(app_data) if app_data else 0, bool(is_path_response),
+        #)
         event = {
             "type": "announce.received",
-            "destination_hash": destination_hash.hex() if destination_hash else None,
-            "identity_hash": announced_identity.hexhash if announced_identity is not None else None,
+            "destination_hash": dest_hex,
+            "identity_hash": ident_hex,
             "app_data_b64": _b64_or_none(app_data),
             "packet_hash": announce_packet_hash.hex() if announce_packet_hash else None,
             "is_path_response": bool(is_path_response),
@@ -98,9 +104,14 @@ class AnnounceService:
     ) -> dict:
         h = destination_hash_hex.lower()
         if not _HEX_HASH.match(h):
+            log.warning("session %s announce rejected — invalid hash %r", session.id, destination_hash_hex)
             raise AnnounceError(f"invalid destination hash: {destination_hash_hex!r}")
         destination = session.owned_destinations.get(bytes.fromhex(h))
         if destination is None:
+            log.warning(
+                "session %s announce rejected — destination %s not owned by this session",
+                session.id, destination_hash_hex,
+            )
             raise AnnounceError(f"destination not owned by this session: {destination_hash_hex}")
 
         app_data: bytes | None = None
@@ -108,12 +119,19 @@ class AnnounceService:
             try:
                 app_data = base64.b64decode(app_data_b64, validate=True)
             except Exception as e:
+                log.warning("session %s announce: invalid base64 app_data: %s", session.id, e)
                 raise AnnounceError(f"app_data_b64 is not valid base64: {e}") from None
 
+        log.debug(
+            "session %s announcing destination %s (app_data_bytes=%d)",
+            session.id, destination.hash.hex(), len(app_data) if app_data else 0,
+        )
         try:
             destination.announce(app_data=app_data)
         except Exception as e:
+            log.warning("session %s RNS refused announce on %s: %s", session.id, destination.hash.hex(), e)
             raise AnnounceError(f"RNS refused to announce: {e}") from None
+        log.info("session %s announced destination %s", session.id, destination.hash.hex())
 
         event = {
             "type": "announce.sent",

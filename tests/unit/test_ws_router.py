@@ -5,6 +5,7 @@ from rnsapi.ws.router import WSRouter
 
 class FakeConn:
     def __init__(self):
+        self.id = "fake"
         self.sent: list[dict] = []
 
     async def send_json(self, data: dict):

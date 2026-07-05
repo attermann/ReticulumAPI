@@ -44,7 +44,7 @@ class RNSService:
         )
         self.reticulum = RNS.Reticulum(
             configdir=configdir_arg,
-            verbosity=self._config.rns.log_level,
+            loglevel=self._config.rns.log_level,
             logdest=RNS.LOG_STDOUT,
         )
         self._started = True

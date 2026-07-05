@@ -191,30 +191,51 @@ class ResourcesService:
                 link.set_resource_strategy(RNS.Link.ACCEPT_ALL)
             else:
                 link.set_resource_strategy(RNS.Link.ACCEPT_NONE)
-        except Exception:
-            log.debug("set_resource_strategy not supported by this Link build")
+            log.debug(
+                "session %s link %s resource strategy set to %s",
+                session.id, link_dest_hash.hex(), "ACCEPT_ALL" if accept else "ACCEPT_NONE",
+            )
+        except Exception as e:
+            log.warning(
+                "session %s link %s: set_resource_strategy failed: %s",
+                session.id, link_dest_hash.hex(), e,
+            )
 
         session_id = session.id
         link_id_hex = link_dest_hash.hex()
 
         def _on_resource_started(resource):
+            log.debug(
+                "session %s link %s inbound resource advertised (data_size=%s)",
+                session_id, link_id_hex, getattr(resource, "get_data_size", lambda: "?")(),
+            )
             AsyncBridge.run_async(
                 self._on_receive_started(session, link_dest_hash, aspect, resource)
             )
 
         def _on_resource_concluded(resource):
+            log.debug(
+                "session %s link %s inbound resource concluded (status=%s)",
+                session_id, link_id_hex, _status_str(getattr(resource, "status", None)),
+            )
             AsyncBridge.run_async(
                 self._on_receive_concluded(session, link_dest_hash, aspect, resource)
             )
 
         try:
             link.set_resource_started_callback(_on_resource_started)
-        except Exception:
-            log.debug("set_resource_started_callback not supported")
+        except Exception as e:
+            log.warning(
+                "session %s link %s: set_resource_started_callback failed: %s",
+                session.id, link_dest_hash.hex(), e,
+            )
         try:
             link.set_resource_concluded_callback(_on_resource_concluded)
-        except Exception:
-            log.debug("set_resource_concluded_callback not supported")
+        except Exception as e:
+            log.warning(
+                "session %s link %s: set_resource_concluded_callback failed: %s",
+                session.id, link_dest_hash.hex(), e,
+            )
 
     def set_link_policy(self, session: "Session", link_id_hex: str, accept: bool) -> dict:
         try:
@@ -225,12 +246,16 @@ class ResourcesService:
         if entry is None:
             raise ResourceError(f"unknown link: {link_id_hex}")
         session.link_resource_policy[link_hash] = {"accept": bool(accept)}
-        try:
-            entry.link.set_resource_strategy(
-                RNS.Link.ACCEPT_ALL if accept else RNS.Link.ACCEPT_NONE
-            )
-        except Exception:
-            log.debug("set_resource_strategy not supported by this Link build")
+        if entry.link is not None:
+            try:
+                entry.link.set_resource_strategy(
+                    RNS.Link.ACCEPT_ALL if accept else RNS.Link.ACCEPT_NONE
+                )
+            except Exception as e:
+                log.warning(
+                    "session %s link %s: set_resource_strategy failed on policy update: %s",
+                    session.id, link_id_hex, e,
+                )
         return {"ok": True, "link_id": link_id_hex, "accept": bool(accept)}
 
     # ---------- receive-side ----------
@@ -240,10 +265,12 @@ class ResourcesService:
         total_size = 0
         try:
             total_size = int(resource.get_data_size())
-        except Exception:
+        except Exception as e:
+            log.debug("resource.get_data_size() raised, falling back to total_size attribute: %s", e)
             try:
                 total_size = int(getattr(resource, "total_size", 0) or 0)
-            except Exception:
+            except Exception as e2:
+                log.debug("resource.total_size attribute also unreadable: %s", e2)
                 total_size = 0
         state = TransferState(
             transfer_id=transfer_id,
@@ -360,8 +387,8 @@ class ResourcesService:
                     with open(dest_path, "wb") as out:
                         try:
                             data_handle.seek(0)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            log.debug("data_handle.seek(0) raised (non-seekable handle?): %s", e)
                         while True:
                             chunk = data_handle.read(64 * 1024)
                             if not chunk:
@@ -369,14 +396,18 @@ class ResourcesService:
                             out.write(chunk)
                 try:
                     dest_path.chmod(0o600)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.debug("chmod 0o600 failed on %s: %s", dest_path, e)
                 state.temp_path = dest_path
                 state.total_size = dest_path.stat().st_size
                 state.bytes_transferred = state.total_size
                 state.progress = 1.0
+                log.info(
+                    "session %s inbound resource %s COMPLETE (size=%d, temp=%s)",
+                    session.id, transfer_id, state.total_size, dest_path,
+                )
             except Exception as e:
-                log.exception("copying received resource failed")
+                log.exception("copying received resource %s failed", transfer_id)
                 state.status = "FAILED"
                 state.failure_reason = f"local_copy_failed: {e}"
 
@@ -384,6 +415,10 @@ class ResourcesService:
             await self._hub.send_session(session.id, payload)
         else:
             state.failure_reason = state.failure_reason or state.status
+            log.info(
+                "session %s inbound resource %s ended in non-COMPLETE state %s",
+                session.id, transfer_id, state.status,
+            )
             await self._hub.send_session(
                 session.id,
                 {"type": "resource.failed", **state.to_dict()},
@@ -420,11 +455,18 @@ class ResourcesService:
         try:
             link_hash = bytes.fromhex(link_id_hex.lower())
         except ValueError:
+            log.warning("session %s resource send rejected — invalid link id %r", session.id, link_id_hex)
             raise ResourceError(f"invalid link id: {link_id_hex!r}") from None
         entry = session.open_links.get(link_hash)
         if entry is None:
+            log.warning("session %s resource send rejected — unknown link %s", session.id, link_id_hex)
             raise ResourceError(f"unknown link: {link_id_hex}")
         if getattr(entry.link, "status", None) != RNS.Link.ACTIVE:
+            log.warning(
+                "session %s resource send rejected — link %s not ACTIVE (status=%s)",
+                session.id, link_id_hex,
+                _status_str(getattr(entry.link, "status", None)) if entry.link else "no-link",
+            )
             raise ResourceError(
                 "link is not ACTIVE — wait for the link.established event or "
                 "reopen the link with await_established=true before sending a resource"
@@ -457,7 +499,8 @@ class ResourcesService:
         def _on_progress(res):
             try:
                 progress = float(res.get_progress())
-            except Exception:
+            except Exception as e:
+                log.debug("resource %s: get_progress() raised: %s", transfer_id, e)
                 progress = state.progress
             state.progress = progress
             state.bytes_transferred = int(progress * state.total_size) if state.total_size else 0
@@ -475,20 +518,31 @@ class ResourcesService:
             if isinstance(resource_data, (bytes, bytearray)) is False:
                 try:
                     resource_data.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.debug("resource %s: close() on source file handle raised: %s", transfer_id, e)
             # Clean up the upload temp file — the send is done
             if state.upload_temp_path is not None:
                 try:
                     state.upload_temp_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning(
+                        "resource %s: could not remove upload temp file %s: %s",
+                        transfer_id, state.upload_temp_path, e,
+                    )
                 state.upload_temp_path = None
 
             if status == RNS.Resource.COMPLETE:
+                log.info(
+                    "session %s outbound resource %s to link %s COMPLETE (bytes=%d)",
+                    session_id, transfer_id, link_id_hex, state.total_size,
+                )
                 event = {"type": "resource.sent", **state.to_dict()}
             else:
                 state.failure_reason = state.failure_reason or state.status
+                log.info(
+                    "session %s outbound resource %s to link %s ended non-COMPLETE (status=%s)",
+                    session_id, transfer_id, link_id_hex, state.status,
+                )
                 event = {"type": "resource.failed", **state.to_dict()}
             AsyncBridge.run_async(self._hub.send_session(session_id, event))
 
@@ -508,7 +562,15 @@ class ResourcesService:
             )
         except Exception as e:
             session.active_transfers.pop(transfer_id, None)
+            log.warning(
+                "session %s: RNS refused to create Resource on link %s: %s",
+                session_id, link_id_hex, e,
+            )
             raise ResourceError(f"RNS refused to create Resource: {e}") from None
+        log.info(
+            "session %s outbound resource %s starting on link %s (size=%d, auto_compress=%s)",
+            session_id, transfer_id, link_id_hex, state.total_size, auto_compress,
+        )
 
         state.resource = resource
         state.status = _status_str(getattr(resource, "status", None))
@@ -545,12 +607,13 @@ class ResourcesService:
 
     def cancel(self, session: "Session", transfer_id: str) -> dict:
         state = self.get_state(session, transfer_id)
+        log.info("session %s cancelling transfer %s (status=%s)", session.id, transfer_id, state.status)
         # Cancel the RNS resource if still in flight.
         if state.resource is not None:
             try:
                 state.resource.cancel()
             except Exception:
-                log.exception("resource.cancel raised")
+                log.exception("resource.cancel raised on transfer %s", transfer_id)
         state.status = "CANCELLED"
         state.failure_reason = state.failure_reason or "cancelled"
         if state.poller_task is not None:
@@ -559,14 +622,14 @@ class ResourcesService:
         if state.temp_path is not None:
             try:
                 state.temp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("resource cancel: could not remove temp file %s: %s", state.temp_path, e)
             state.temp_path = None
         if state.upload_temp_path is not None:
             try:
                 state.upload_temp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("resource cancel: could not remove upload temp %s: %s", state.upload_temp_path, e)
             state.upload_temp_path = None
         # Signal any awaiter
         if state.done_event is not None and AsyncBridge.main_loop is not None:
@@ -586,8 +649,8 @@ class ResourcesService:
         if state.temp_path is not None:
             try:
                 state.temp_path.unlink(missing_ok=True)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("resource delete: could not remove temp file %s: %s", state.temp_path, e)
         session.active_transfers.pop(transfer_id, None)
         return {"ok": True, "transfer_id": transfer_id}
 
@@ -613,19 +676,19 @@ class ResourcesService:
             if state.resource is not None:
                 try:
                     state.resource.cancel()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning("cleanup: resource.cancel() raised on transfer %s: %s", transfer_id, e)
                 state.resource = None
             if state.poller_task is not None:
                 state.poller_task.cancel()
             if state.temp_path is not None:
                 try:
                     state.temp_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning("cleanup: could not remove temp %s: %s", state.temp_path, e)
             if state.upload_temp_path is not None:
                 try:
                     state.upload_temp_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.warning("cleanup: could not remove upload temp %s: %s", state.upload_temp_path, e)
         session.active_transfers.clear()

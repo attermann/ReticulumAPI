@@ -60,12 +60,18 @@ class PacketsService:
         ourselves) and falls back to RNS.Identity.recall, which succeeds when
         we've received an announce carrying this identity's public key.
         """
+        hex_hash = identity_hash.hex()
         if self._identities is not None:
             try:
-                return self._identities.load(identity_hash.hex())
-            except Exception:
-                pass
-        return RNS.Identity.recall(identity_hash)
+                identity = self._identities.load(hex_hash)
+                log.debug("resolved identity %s from local IdentityService", hex_hash)
+                return identity
+            except Exception as e:
+                log.debug("local IdentityService could not load %s (%s); trying RNS.Identity.recall", hex_hash, e)
+        identity = RNS.Identity.recall(identity_hash)
+        if identity is None:
+            log.debug("RNS.Identity.recall(%s) returned None — no announce received", hex_hash)
+        return identity
 
     # ---------- listening ----------
 
@@ -85,12 +91,20 @@ class PacketsService:
         def _on_packet(data, packet):
             # Runs on an RNS thread.
             packet_hash = getattr(packet, "packet_hash", None) or getattr(packet, "hash", None)
+            size = len(data) if data else 0
+            log.debug(
+                "session %s destination %s inbound packet (size=%d hops=%s rssi=%s snr=%s)",
+                session_id, h, size,
+                getattr(packet, "hops", None),
+                getattr(packet, "rssi", None),
+                getattr(packet, "snr", None),
+            )
             event = {
                 "type": "packet.received",
                 "session_id": session_id,
                 "destination_hash": h,
                 "data_b64": _b64_or_none(data),
-                "size": len(data) if data else 0,
+                "size": size,
                 "packet_hash": packet_hash.hex() if packet_hash else None,
                 "hops": getattr(packet, "hops", None),
                 "rssi": getattr(packet, "rssi", None),
@@ -135,19 +149,28 @@ class PacketsService:
     ) -> dict:
         ih = identity_hash_hex.lower()
         if not _HEX_HASH.match(ih):
+            log.warning("session %s packet send rejected — invalid identity hash %r", session.id, identity_hash_hex)
             raise PacketError(f"invalid identity hash: {identity_hash_hex!r}")
         if not isinstance(app_name, str) or not _ASPECT_RE.match(app_name):
+            log.warning("session %s packet send rejected — invalid app_name %r", session.id, app_name)
             raise PacketError("app_name must match [a-zA-Z0-9_]+")
         if not isinstance(aspects, list) or not all(_ASPECT_RE.match(a) for a in aspects):
+            log.warning("session %s packet send rejected — invalid aspects %r", session.id, aspects)
             raise PacketError("aspects must be a list of [a-zA-Z0-9_]+ strings")
         try:
             data = base64.b64decode(data_b64, validate=True)
         except Exception as e:
+            log.warning("session %s packet send: invalid base64 data_b64: %s", session.id, e)
             raise PacketError(f"data_b64 is not valid base64: {e}") from None
 
         identity_hash = bytes.fromhex(ih)
         target_identity = self._resolve_identity(identity_hash)
         if target_identity is None:
+            log.warning(
+                "session %s packet send rejected — identity %s not known "
+                "(no announce received and no local identity file)",
+                session.id, ih,
+            )
             raise PacketError(
                 "no known identity for hash — send an announce or issue a path request first"
             )
@@ -163,10 +186,18 @@ class PacketsService:
             packet = RNS.Packet(out_destination, data)
             receipt = packet.send()
         except Exception as e:
+            log.warning(
+                "session %s RNS refused to send packet to %s (%s.%s): %s",
+                session.id, out_destination.hash.hex(), app_name, ".".join(aspects), e,
+            )
             raise PacketError(f"RNS refused to send packet: {e}") from None
 
         packet_hash = (packet.packet_hash or b"").hex() if packet.packet_hash else None
         target_dest_hash = out_destination.hash.hex()
+        log.debug(
+            "session %s outbound packet to %s (size=%d packet_hash=%s has_receipt=%s)",
+            session.id, target_dest_hash, len(data), packet_hash, receipt is not None,
+        )
 
         session_id = session.id
 
@@ -176,12 +207,17 @@ class PacketsService:
             session.pending_receipts[packet_hash] = receipt
 
         def _on_delivered(r):
+            rtt = r.get_rtt()
+            log.debug(
+                "session %s packet %s delivered to %s (rtt=%.3fs)",
+                session_id, packet_hash, target_dest_hash, rtt if rtt is not None else -1,
+            )
             event = {
                 "type": "packet.receipt.delivered",
                 "session_id": session_id,
                 "destination_hash": target_dest_hash,
                 "packet_hash": packet_hash,
-                "rtt": r.get_rtt(),
+                "rtt": rtt,
                 "status": _RECEIPT_STATUS_MAP.get(r.get_status(), "UNKNOWN"),
             }
             AsyncBridge.run_async(self._hub.send_session(session_id, event))
@@ -189,6 +225,10 @@ class PacketsService:
                 session.pending_receipts.pop(packet_hash, None)
 
         def _on_timeout(r):
+            log.info(
+                "session %s packet %s to %s timed out awaiting proof",
+                session_id, packet_hash, target_dest_hash,
+            )
             event = {
                 "type": "packet.receipt.failed",
                 "session_id": session_id,
@@ -206,8 +246,11 @@ class PacketsService:
             if proof_timeout is not None:
                 try:
                     receipt.set_timeout(proof_timeout)
-                except Exception:
-                    log.debug("PacketReceipt.set_timeout not accepted, using default")
+                except Exception as e:
+                    log.warning(
+                        "session %s PacketReceipt.set_timeout(%s) rejected, using RNS default: %s",
+                        session_id, proof_timeout, e,
+                    )
 
         await self._hub.send_session(
             session_id,

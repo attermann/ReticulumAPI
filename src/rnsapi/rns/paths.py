@@ -94,23 +94,25 @@ class PathsService:
 
     def _path_snapshot(self, destination_hash: bytes) -> dict:
         """Return the current known path info for a given destination hash."""
+        dest_hex = destination_hash.hex()
         try:
             hops = RNS.Transport.hops_to(destination_hash)
-        except Exception:
+        except Exception as e:
+            log.debug("Transport.hops_to(%s) raised: %s", dest_hex, e)
             hops = None
         next_hop = None
         try:
             next_hop = RNS.Transport.next_hop(destination_hash)
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("Transport.next_hop(%s) raised: %s", dest_hex, e)
         interface = None
         try:
             iface = RNS.Transport.next_hop_interface(destination_hash)
             interface = str(iface) if iface is not None else None
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug("Transport.next_hop_interface(%s) raised: %s", dest_hex, e)
         return {
-            "destination_hash": destination_hash.hex(),
+            "destination_hash": dest_hex,
             "hops": hops if hops is not None and hops != RNS.Transport.PATHFINDER_M else None,
             "next_hop": _hex_or_none(next_hop),
             "interface": interface,
@@ -124,6 +126,7 @@ class PathsService:
     ) -> dict:
         h = destination_hash_hex.lower()
         if not _HEX_HASH.match(h):
+            log.warning("session %s path request rejected — invalid hash %r", session.id, destination_hash_hex)
             raise PathsError(f"invalid destination hash: {destination_hash_hex!r}")
         hash_bytes = bytes.fromhex(h)
 
@@ -136,22 +139,33 @@ class PathsService:
             },
         )
 
+        effective_timeout = (
+            timeout if timeout is not None else self._config.limits.path_request_timeout
+        )
+        log.debug(
+            "session %s requesting path to %s (timeout=%.1fs)",
+            session.id, h, effective_timeout,
+        )
         try:
             RNS.Transport.request_path(hash_bytes)
         except Exception as e:
+            log.warning("session %s RNS refused path request to %s: %s", session.id, h, e)
             raise PathsError(f"RNS refused path request: {e}") from None
 
-        deadline = time.monotonic() + (
-            timeout if timeout is not None else self._config.limits.path_request_timeout
-        )
+        deadline = time.monotonic() + effective_timeout
         while True:
             has_path = False
             try:
                 has_path = RNS.Transport.has_path(hash_bytes)
-            except Exception:
-                pass
+            except Exception as e:
+                log.debug("Transport.has_path(%s) raised: %s", h, e)
             if has_path:
+                log.info("session %s path resolved to %s", session.id, h)
                 return {"found": True, **self._path_snapshot(hash_bytes)}
             if time.monotonic() >= deadline:
+                log.info(
+                    "session %s path request to %s timed out after %.1fs",
+                    session.id, h, effective_timeout,
+                )
                 return {"found": False, "destination_hash": h}
             await asyncio.sleep(_POLL_INTERVAL)

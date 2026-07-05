@@ -101,14 +101,18 @@ class DestinationService:
         d = direction.lower()
         t = dtype.lower()
         if d not in _DIRECTION_MAP:
+            log.warning("session %s destination create rejected — invalid direction %r", session.id, direction)
             raise DestinationError(f"invalid direction: {direction!r}")
         if t not in _TYPE_MAP:
+            log.warning("session %s destination create rejected — invalid type %r", session.id, dtype)
             raise DestinationError(f"invalid type: {dtype!r}")
         if not app_name or not _ASPECT_RE.match(app_name):
+            log.warning("session %s destination create rejected — invalid app_name %r", session.id, app_name)
             raise DestinationError("app_name must match [a-zA-Z0-9_]+")
         aspects_t = tuple(aspects)
         for a in aspects_t:
             if not _ASPECT_RE.match(a):
+                log.warning("session %s destination create rejected — invalid aspect %r", session.id, a)
                 raise DestinationError(f"aspect must match [a-zA-Z0-9_]+: {a!r}")
 
         try:
@@ -121,6 +125,10 @@ class DestinationService:
             )
         except KeyError as e:
             # RNS raises KeyError when a destination with the same hash exists.
+            log.warning(
+                "session %s destination create failed — RNS already has a destination with this hash (%s.%s on identity %s)",
+                session.id, app_name, ".".join(aspects_t), identity.hexhash,
+            )
             raise DestinationError(f"destination already registered: {e}") from None
         session.owned_destinations[destination.hash] = destination
         info = _info_from_destination(destination)

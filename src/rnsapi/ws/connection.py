@@ -32,23 +32,25 @@ class WSConnection:
 
     async def send_json(self, data: dict) -> None:
         if self.ws.closed:
+            log.debug("send_json to closed ws %s (event type=%s)", self.id, data.get("type"))
             return
         async with self._send_lock:
             if self.ws.closed:
+                log.debug("send_json to ws %s that closed while waiting for lock (event=%s)", self.id, data.get("type"))
                 return
             try:
                 await self.ws.send_json(data)
             except ConnectionResetError:
-                log.debug("send_json on closed ws %s", self.id)
+                log.debug("send_json on reset-during-write ws %s (event=%s)", self.id, data.get("type"))
             except Exception:
-                log.exception("send_json failed on ws %s", self.id)
+                log.exception("send_json failed on ws %s (event=%s)", self.id, data.get("type"))
 
     async def close(self, code: int = 1000, message: str = "") -> None:
         try:
             if not self.ws.closed:
                 await self.ws.close(code=code, message=message.encode() if isinstance(message, str) else message)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("ws close raised on %s: %s", self.id, e)
 
     def attach(self, session: "Session") -> None:
         self.session = session

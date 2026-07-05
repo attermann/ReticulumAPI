@@ -61,6 +61,14 @@ python3 -m venv .venv
 .venv/bin/rnsapid                  # starts on https://127.0.0.1:8000
 ```
 
+Install default identity:
+
+(Required if using with the microReticulum RNode management web app)
+
+```bash
+cp <path_to_identiy_file> ~/.config/rnsapi/default_identity
+```
+
 Verify:
 
 ```bash
