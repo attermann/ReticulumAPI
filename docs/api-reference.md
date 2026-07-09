@@ -701,20 +701,31 @@ Request:
   "app_name": "myapp",
   "aspects": ["messaging", "v1"],
   "data_b64": "base64 of the payload",
-  "proof_timeout": 15
+  "proof_timeout": 15,
+  "path_lookup_timeout": 15.0
 }
 ```
 
 `proof_timeout` is optional; when set, adjusts how long the daemon holds
-the `PacketReceipt` before firing `packet.receipt.failed`. The target
-identity is resolved by:
+the `PacketReceipt` before firing `packet.receipt.failed`.
+
+`path_lookup_timeout` is optional (default `15.0` seconds) and bounds the
+path-discovery step described below.
+
+The target identity is resolved by:
 
 1. Looking it up in the local identity store
-   (`~/.config/rnsapi/identities/`), and if not found,
-2. Calling `RNS.Identity.recall(...)` (which succeeds once an announce
-   carrying this identity's public key has been received).
+   (`~/.config/rnsapi/identities/`) — the fast path for identities we
+   own.
+2. If the routing table has no entry for the computed destination hash,
+   issuing `RNS.Transport.request_path(...)` and polling `has_path`
+   until it succeeds or `path_lookup_timeout` elapses. A successful
+   path-request response also populates RNS's announce cache.
+3. If step 1 didn't find a local identity, calling
+   `RNS.Identity.recall(...)`, which succeeds once an announce carrying
+   this identity's public key has been received.
 
-If neither succeeds, the endpoint returns `404 Not Found`.
+If steps 1 and 3 both fail, the endpoint returns `404 Not Found`.
 
 Response `200 OK`:
 

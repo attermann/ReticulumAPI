@@ -65,7 +65,8 @@ async def test_open_rejects_unknown_identity(rns_instance):
     session = _new_session()
     with pytest.raises(LinkError, match="no known identity"):
         await svc.open_link(
-            session, identity_hash="ee" * 16, app_name="rnsapi_test", aspects=["x"]
+            session, identity_hash="ee" * 16, app_name="rnsapi_test", aspects=["x"],
+            path_lookup_timeout=0.05,
         )
 
 
@@ -348,3 +349,121 @@ async def test_cleanup_tears_down_all_links(rns_instance):
     await svc.cleanup_session(session)
     assert calls == ["torn"] * 3
     assert session.open_links == {}
+
+
+# ---------- path resolution ordering ----------
+
+
+@pytest.mark.asyncio
+async def test_resolve_probes_path_before_recalling_identity(rns_instance, monkeypatch):
+    """The fix: has_path first, then request_path (if no path), THEN Identity.recall.
+
+    Previously we called Identity.recall first and bailed early, so a
+    destination we hadn't announce-cached could never be reached.
+    """
+    import RNS
+
+    calls: list[tuple[str, str]] = []
+
+    def _has_path(h):
+        calls.append(("has_path", h.hex()))
+        return False
+
+    def _request_path(h):
+        calls.append(("request_path", h.hex()))
+
+    def _recall(h, from_identity_hash=False):
+        calls.append(("recall", h.hex()))
+        return None
+
+    monkeypatch.setattr(RNS.Transport, "has_path", _has_path)
+    monkeypatch.setattr(RNS.Transport, "request_path", _request_path)
+    monkeypatch.setattr(RNS.Identity, "recall", staticmethod(_recall))
+
+    svc = LinksService(WSHub())
+    session = _new_session()
+    prepared = svc._prepare_open_link(
+        session, identity_hash="ee" * 16, destination_hash=None,
+        app_name="rnsapi_test", aspects=["x"],
+    )
+    with pytest.raises(LinkError, match="no known identity"):
+        await svc._resolve_and_construct_destination(
+            session, prepared, path_lookup_timeout=0.05,
+        )
+
+    kinds = [c[0] for c in calls]
+    assert "has_path" in kinds
+    assert "request_path" in kinds
+    assert "recall" in kinds
+    # Ordering: has_path fires first, then request_path, then recall.
+    assert kinds.index("has_path") < kinds.index("request_path") < kinds.index("recall")
+
+
+@pytest.mark.asyncio
+async def test_resolve_skips_request_path_when_path_already_known(rns_instance, monkeypatch):
+    """If has_path returns True, request_path must not be issued."""
+    import RNS
+
+    request_calls: list[bytes] = []
+    monkeypatch.setattr(RNS.Transport, "has_path", lambda h: True)
+    monkeypatch.setattr(RNS.Transport, "request_path", lambda h: request_calls.append(h))
+
+    recall_calls: list[bytes] = []
+
+    def _recall(h, from_identity_hash=False):
+        recall_calls.append(h)
+        return None
+
+    monkeypatch.setattr(RNS.Identity, "recall", staticmethod(_recall))
+
+    svc = LinksService(WSHub())
+    session = _new_session()
+    prepared = svc._prepare_open_link(
+        session, identity_hash="ee" * 16, destination_hash=None,
+        app_name="rnsapi_test", aspects=["x"],
+    )
+    with pytest.raises(LinkError, match="no known identity"):
+        await svc._resolve_and_construct_destination(
+            session, prepared, path_lookup_timeout=1.0,
+        )
+
+    assert request_calls == []
+    assert recall_calls, "Identity.recall should still be consulted"
+
+
+@pytest.mark.asyncio
+async def test_resolve_still_probes_path_when_local_identity_hits(rnsapi_home, rns_instance, monkeypatch):
+    """Local .rid load succeeds → we still do the path lookup (so RNS.Link has a route)."""
+    import RNS
+
+    identities = IdentityService(rnsapi_home)
+    identity, info = identities.create()
+
+    has_calls: list[bytes] = []
+    request_calls: list[bytes] = []
+    recall_calls: list[bytes] = []
+
+    monkeypatch.setattr(RNS.Transport, "has_path", lambda h: (has_calls.append(h) or False))
+    monkeypatch.setattr(RNS.Transport, "request_path", lambda h: request_calls.append(h))
+
+    def _recall(h, from_identity_hash=False):
+        recall_calls.append(h)
+        return None
+
+    monkeypatch.setattr(RNS.Identity, "recall", staticmethod(_recall))
+
+    svc = LinksService(WSHub(), identities)
+    session = _new_session()
+    prepared = svc._prepare_open_link(
+        session, identity_hash=info.hash_hex, destination_hash=None,
+        app_name="rnsapi_test", aspects=["x"],
+    )
+    # No exception — local identity resolved. The destination should be built
+    # from the local identity, and request_path should still have been issued.
+    await svc._resolve_and_construct_destination(
+        session, prepared, path_lookup_timeout=0.05,
+    )
+    assert prepared.destination is not None
+    assert has_calls, "has_path must be probed even for locally-owned identities"
+    assert request_calls, "request_path must fire when has_path returns False"
+    assert recall_calls == [], "recall should be skipped when local .rid resolves the identity"

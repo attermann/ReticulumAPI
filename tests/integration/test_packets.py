@@ -132,6 +132,7 @@ async def test_send_endpoint_emits_packet_sent(client):
                 "app_name": "rnsapi_test",
                 "aspects": ["send_e2e"],
                 "data_b64": base64.b64encode(b"payload").decode(),
+                "path_lookup_timeout": 0.1,
             },
         )
         assert r.status == 200
@@ -154,6 +155,7 @@ async def test_send_rejects_unknown_identity(client):
             "app_name": "rnsapi_test",
             "aspects": ["x"],
             "data_b64": base64.b64encode(b"x").decode(),
+            "path_lookup_timeout": 0.1,
         },
     )
     assert r.status == 404
@@ -191,6 +193,7 @@ async def test_ws_send_and_listen(client):
                 "app_name": "rnsapi_test",
                 "aspects": ["ws_send"],
                 "data_b64": base64.b64encode(b"ws-payload").decode(),
+                "path_lookup_timeout": 0.1,
             }
         )
         ev = await _wait_event(ws, "packets.send.result")

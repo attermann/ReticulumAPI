@@ -175,14 +175,28 @@ class _LinkEntry:
 
 @dataclass
 class _PreparedOpen:
-    """Validated inputs for an open_link — everything needed to create the
-    RNS.Link, but without having created it yet. Deferring RNS.Link()
-    construction lets us emit `link.open.phase` events on the wire before
-    RNS can fire `_on_established` from a worker thread and beat the phase
-    event to the client."""
+    """Validated inputs for an open_link.
 
-    destination: object  # RNS.Destination
+    Populated in two phases: `_prepare_open_link` runs synchronously and
+    supplies everything except the RNS.Identity/Destination — that requires
+    a path lookup (which is async) and is deferred to
+    `_resolve_and_construct_destination`, which sets `destination` in place
+    before link creation.
+
+    Deferring RNS.Link() construction lets us emit `link.open.phase` events
+    on the wire before RNS can fire `_on_established` from a worker thread
+    and beat the phase event to the client.
+
+    `input_hash` is the raw hex-decoded hash the caller supplied (either
+    identity_hash or destination_hash). It's kept around so the local .rid
+    fallback can be attempted with the identity-hash form the caller
+    supplied, while `destination_hash` always holds the on-wire destination
+    hash used for path lookup and Identity.recall.
+    """
+
+    destination: Optional[object]  # RNS.Destination — populated after path/identity resolution
     destination_hash: bytes
+    input_hash: bytes
     aspect: str
     app_name: str
     sub_aspects: tuple
@@ -204,26 +218,111 @@ class LinksService:
         """
         self._resources = resources_svc
 
-    # ---------- identity resolution ----------
+    # ---------- identity + path resolution ----------
 
-    def _resolve_identity(self, identity_hash: bytes):
-        hex_hash = identity_hash.hex()
-        if self._identities is not None:
-            try:
-                identity = self._identities.load(hex_hash)
-                log.debug("resolved identity %s from local IdentityService", hex_hash)
-                return identity
-            except Exception as e:
-                # Not found locally is the common case (peer identity we only
-                # know via announce), so this is expected — but log at debug
-                # for troubleshooting.
-                log.debug("local IdentityService could not load %s (%s); falling back to RNS.Identity.recall", hex_hash, e)
-        identity = RNS.Identity.recall(identity_hash)
-        if identity is None:
-            log.debug("RNS.Identity.recall(%s) returned None — no announce received for this hash", hex_hash)
-        else:
-            log.debug("resolved identity %s via RNS.Identity.recall (announce cache)", hex_hash)
-        return identity
+    def _try_local_identity(self, input_hash: bytes):
+        """Fast-path: return an identity from the local .rid store, or None.
+
+        The input hash is treated as an identity hash (that's how .rid
+        files are keyed). Falls through silently when the file doesn't
+        exist — the network-side resolution below will pick it up.
+        """
+        if self._identities is None:
+            return None
+        hex_hash = input_hash.hex()
+        try:
+            identity = self._identities.load(hex_hash)
+            log.debug("resolved identity for %s from local IdentityService", hex_hash)
+            return identity
+        except Exception as e:
+            log.debug(
+                "local IdentityService could not load %s (%s); will consult RNS announce cache after path lookup",
+                hex_hash, e,
+            )
+            return None
+
+    async def _request_path(self, dest_hash: bytes, timeout: float = 15.0):
+        log.debug("issuing RNS path request for %s", dest_hash.hex())
+        try:
+            RNS.Transport.request_path(dest_hash)
+        except Exception as e:
+            log.warning("RNS.Transport.request_path(%s) raised: %s", dest_hash.hex(), e)
+        deadline = time.monotonic() + timeout
+        while not RNS.Transport.has_path(dest_hash) and time.monotonic() < deadline:
+            await asyncio.sleep(_POLL_INTERVAL_S)
+
+    async def _resolve_and_construct_destination(
+        self,
+        session: "Session",
+        prepared: _PreparedOpen,
+        *,
+        path_lookup_timeout: float,
+        on_phase: Optional[Callable[[str], Awaitable[None]]] = None,
+    ) -> None:
+        """Path lookup + identity resolution + destination construction.
+
+        The correct RNS flow is: check `has_path` first, issue
+        `request_path` if we don't have a route, wait for the announce
+        response to arrive (which also populates the identity cache), THEN
+        call `Identity.recall`. Doing recall first (as we used to) meant we
+        bailed early on any destination we hadn't previously heard an
+        announce from — the path request never got a chance to fill the
+        cache.
+
+        Populates `prepared.destination` in place. Raises LinkError if we
+        still can't find an identity after the path lookup.
+        """
+        # Fast path: identities we own locally never need the network.
+        target_identity = self._try_local_identity(prepared.input_hash)
+
+        # Path lookup runs regardless of local resolution — RNS.Link needs a
+        # route. For locally-owned destinations `has_path` typically returns
+        # False (the destination isn't in the routing table), so we'll wait
+        # out the timeout and proceed anyway.
+        if not RNS.Transport.has_path(prepared.destination_hash):
+            if on_phase is not None:
+                await on_phase("finding_path")
+            await self._request_path(prepared.destination_hash, path_lookup_timeout)
+            if not RNS.Transport.has_path(prepared.destination_hash):
+                log.warning(
+                    "no path to %s after %.1fs — proceeding anyway (RNS may still retry)",
+                    prepared.destination_hash.hex(), path_lookup_timeout,
+                )
+            else:
+                log.debug("path to %s resolved", prepared.destination_hash.hex())
+
+        # If local didn't have it, the announce cache may have been
+        # populated by the path-request response — try recall now.
+        if target_identity is None:
+            target_identity = RNS.Identity.recall(prepared.destination_hash)
+            if target_identity is None:
+                log.debug(
+                    "RNS.Identity.recall(%s) returned None — no announce received for this hash",
+                    prepared.destination_hash.hex(),
+                )
+            else:
+                log.debug(
+                    "resolved identity for %s via RNS.Identity.recall (announce cache)",
+                    prepared.destination_hash.hex(),
+                )
+
+        if target_identity is None:
+            log.warning(
+                "session %s open_link rejected — identity of %s not known "
+                "(no announce received and no local identity file)",
+                session.id, prepared.destination_hash.hex(),
+            )
+            raise LinkError("no known identity for hash — issue an announce or path request first")
+
+        log.debug("session %s resolved to identity: %s", session.id, target_identity.hash.hex())
+        prepared.destination = RNS.Destination(
+            target_identity,
+            RNS.Destination.OUT,
+            RNS.Destination.SINGLE,
+            prepared.app_name,
+            *prepared.sub_aspects,
+        )
+
 
     # ---------- session helpers ----------
 
@@ -259,37 +358,48 @@ class LinksService:
         app_name: str,
         aspects: list[str],
     ) -> _PreparedOpen:
-        """Pre-flight: validate, resolve identity, construct the RNS.Destination.
-        Does NOT create the RNS.Link — see the `_PreparedOpen` docstring for
-        why. Never blocks on the network.
+        """Pre-flight: validate inputs and derive the on-wire destination
+        hash. Does NOT resolve the identity or create the RNS.Destination —
+        that requires a path lookup (async) and is deferred to
+        `_resolve_and_construct_destination`.
+
+        Kept synchronous so the WS `link.open` handler can compute the
+        `link_id` for its immediate ack and reserve a placeholder slot in
+        `session.open_links` before the async continuation runs. Never
+        blocks on the network.
         """
         # Accept either identity_hash or destination_hash as the lookup key.
         # RNS.Identity.recall() resolves both to the target identity, and the
         # webconsole workflow pastes destination hashes rather than identity
-        # hashes — so both spellings are first-class.
-        source_hash = identity_hash if identity_hash is not None else destination_hash
+        # hashes — so both are first-class.
+        target_hash = identity_hash if identity_hash is not None else destination_hash
         if identity_hash is not None and destination_hash is not None:
             raise LinkError("provide identity_hash or destination_hash, not both")
-        if source_hash is None:
+        if target_hash is None:
             raise LinkError("identity_hash or destination_hash is required")
-        h = source_hash.lower()
+        h = target_hash.lower()
         if not _HEX_HASH.match(h):
-            raise LinkError(f"invalid hash: {source_hash!r}")
+            raise LinkError(f"invalid hash: {target_hash!r}")
         if not isinstance(app_name, str) or not _ASPECT_RE.match(app_name):
             raise LinkError("app_name must match [a-zA-Z0-9_]+")
         if not isinstance(aspects, list) or not all(_ASPECT_RE.match(a) for a in aspects):
             raise LinkError("aspects must be a list of [a-zA-Z0-9_]+ strings")
 
-        target_identity = self._resolve_identity(bytes.fromhex(h))
-        if target_identity is None:
-            raise LinkError("no known identity for hash — issue an announce or path request first")
+        input_hash_bytes = bytes.fromhex(h)
+        if destination_hash is not None:
+            # The caller already handed us the on-wire destination hash.
+            dest_hash_bytes = input_hash_bytes
+        else:
+            # Derive the on-wire destination hash from the identity hash.
+            # RNS.Destination.hash accepts identity hash bytes directly, so
+            # we don't need the full Identity object yet — that resolves
+            # asynchronously after the path lookup.
+            dest_hash_bytes = RNS.Destination.hash(input_hash_bytes, app_name, *aspects)
 
-        destination = RNS.Destination(
-            target_identity, RNS.Destination.OUT, RNS.Destination.SINGLE, app_name, *aspects
-        )
         return _PreparedOpen(
-            destination=destination,
-            destination_hash=destination.hash,
+            destination=None,
+            destination_hash=dest_hash_bytes,
+            input_hash=input_hash_bytes,
             aspect=".".join([app_name, *aspects]),
             app_name=app_name,
             sub_aspects=tuple(aspects),
@@ -489,25 +599,16 @@ class LinksService:
                 await self._identify(session, existing)
             return {"reused": True, **_link_snapshot(existing.link, dest_hash, prepared.aspect)}
 
-        # Path lookup (skipped when we already have one cached).
-        if not RNS.Transport.has_path(dest_hash):
-            if on_phase is not None:
-                await on_phase("finding_path")
-            log.debug("issuing RNS path request for %s", dest_hash.hex())
-            try:
-                RNS.Transport.request_path(dest_hash)
-            except Exception as e:
-                log.warning("RNS.Transport.request_path(%s) raised: %s", dest_hash.hex(), e)
-            deadline = time.monotonic() + path_lookup_timeout
-            while not RNS.Transport.has_path(dest_hash) and time.monotonic() < deadline:
-                await asyncio.sleep(_POLL_INTERVAL_S)
-            if not RNS.Transport.has_path(dest_hash):
-                log.warning(
-                    "no path to %s after %.1fs — proceeding to Link creation anyway (RNS will retry)",
-                    dest_hash.hex(), path_lookup_timeout,
-                )
-            else:
-                log.debug("path to %s resolved", dest_hash.hex())
+        # Path lookup + identity resolution + destination construction. This
+        # runs `has_path` → `request_path` (if needed) → `Identity.recall`
+        # in the correct order so a destination we haven't previously
+        # announce-cached can still be reached via a fresh path request.
+        await self._resolve_and_construct_destination(
+            session,
+            prepared,
+            path_lookup_timeout=path_lookup_timeout,
+            on_phase=on_phase,
+        )
 
         # Emit `establishing_link` BEFORE creating the RNS.Link so it can't
         # race with `_on_established` (see _create_link_entry).
@@ -567,23 +668,14 @@ class LinksService:
         """
         dest_hash = prepared.destination_hash
 
-        if not RNS.Transport.has_path(dest_hash):
-            await on_phase("finding_path")
-            log.debug("issuing RNS path request for %s", dest_hash.hex())
-            try:
-                RNS.Transport.request_path(dest_hash)
-            except Exception as e:
-                log.warning("RNS.Transport.request_path(%s) raised: %s", dest_hash.hex(), e)
-            deadline = time.monotonic() + path_lookup_timeout
-            while not RNS.Transport.has_path(dest_hash) and time.monotonic() < deadline:
-                await asyncio.sleep(_POLL_INTERVAL_S)
-            if not RNS.Transport.has_path(dest_hash):
-                log.warning(
-                    "no path to %s after %.1fs — proceeding to Link creation anyway (RNS will retry)",
-                    dest_hash.hex(), path_lookup_timeout,
-                )
-            else:
-                log.debug("path to %s resolved", dest_hash.hex())
+        # Path lookup + identity resolution + destination construction (see
+        # `_resolve_and_construct_destination` for ordering rationale).
+        await self._resolve_and_construct_destination(
+            session,
+            prepared,
+            path_lookup_timeout=path_lookup_timeout,
+            on_phase=on_phase,
+        )
 
         await on_phase("establishing_link")
 

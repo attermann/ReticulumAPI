@@ -122,7 +122,10 @@ async def test_send_requires_recallable_identity(rnsapi_home, rns_instance):
     session = _new_session()
     svc = PacketsService(WSHub())
     with pytest.raises(PacketError, match="no known identity"):
-        await svc.send(session, "ee" * 16, "rnsapi_test", ["send"], base64.b64encode(b"x").decode())
+        await svc.send(
+            session, "ee" * 16, "rnsapi_test", ["send"], base64.b64encode(b"x").decode(),
+            path_lookup_timeout=0.05,
+        )
 
 
 @pytest.mark.asyncio
@@ -157,6 +160,7 @@ async def test_send_to_self_emits_packet_sent(rnsapi_home, rns_instance):
         "rnsapi_test",
         ["self_send"],
         base64.b64encode(b"ping").decode(),
+        path_lookup_timeout=0.05,
     )
     assert result["ok"] is True
     assert result["size"] == 4
@@ -179,10 +183,85 @@ async def test_cleanup_clears_listeners_and_receipts(rnsapi_home, rns_instance):
     assert bytes.fromhex(info.hash_hex) in session.packet_listeners
 
     # Send to self to populate pending_receipts
-    await svc.send(session, identity.hexhash, "rnsapi_test", ["cleanup_send"], base64.b64encode(b"x").decode())
+    await svc.send(
+        session, identity.hexhash, "rnsapi_test", ["cleanup_send"],
+        base64.b64encode(b"x").decode(), path_lookup_timeout=0.05,
+    )
     assert len(session.pending_receipts) >= 1
 
     await svc.cleanup_session(session)
     assert session.packet_listeners == set()
     assert session.pending_receipts == {}
     destinations.remove(session, info.hash_hex)
+
+
+# ---------- path resolution ordering ----------
+
+
+@pytest.mark.asyncio
+async def test_send_probes_path_before_recalling_identity(rns_instance, monkeypatch):
+    """has_path first, then request_path (if no path), THEN Identity.recall.
+
+    Previously send() skipped has_path/request_path entirely and rejected
+    any destination we hadn't received an announce from.
+    """
+    import RNS
+
+    calls: list[str] = []
+
+    def _has_path(h):
+        calls.append("has_path")
+        return False
+
+    def _request_path(h):
+        calls.append("request_path")
+
+    def _recall(h, from_identity_hash=False):
+        calls.append("recall")
+        return None
+
+    monkeypatch.setattr(RNS.Transport, "has_path", _has_path)
+    monkeypatch.setattr(RNS.Transport, "request_path", _request_path)
+    monkeypatch.setattr(RNS.Identity, "recall", staticmethod(_recall))
+
+    svc = PacketsService(WSHub())
+    session = _new_session()
+    with pytest.raises(PacketError, match="no known identity"):
+        await svc.send(
+            session, "ee" * 16, "rnsapi_test", ["x"], base64.b64encode(b"x").decode(),
+            path_lookup_timeout=0.05,
+        )
+
+    assert "has_path" in calls
+    assert "request_path" in calls
+    assert "recall" in calls
+    assert calls.index("has_path") < calls.index("request_path") < calls.index("recall")
+
+
+@pytest.mark.asyncio
+async def test_send_skips_request_path_when_path_already_known(rns_instance, monkeypatch):
+    """If has_path returns True, request_path must not be issued."""
+    import RNS
+
+    request_calls: list[bytes] = []
+    monkeypatch.setattr(RNS.Transport, "has_path", lambda h: True)
+    monkeypatch.setattr(RNS.Transport, "request_path", lambda h: request_calls.append(h))
+
+    recall_calls: list[bytes] = []
+
+    def _recall(h, from_identity_hash=False):
+        recall_calls.append(h)
+        return None
+
+    monkeypatch.setattr(RNS.Identity, "recall", staticmethod(_recall))
+
+    svc = PacketsService(WSHub())
+    session = _new_session()
+    with pytest.raises(PacketError, match="no known identity"):
+        await svc.send(
+            session, "ee" * 16, "rnsapi_test", ["x"], base64.b64encode(b"x").decode(),
+            path_lookup_timeout=1.0,
+        )
+
+    assert request_calls == []
+    assert recall_calls, "Identity.recall should still be consulted after the path check"

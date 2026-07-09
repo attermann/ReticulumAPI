@@ -10,9 +10,11 @@ RNS callbacks run on worker threads, so every event flows through
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 import re
+import time
 from typing import TYPE_CHECKING, Optional
 
 import RNS
@@ -30,6 +32,7 @@ log = logging.getLogger(__name__)
 
 _HEX_HASH = re.compile(r"^[0-9a-f]{32}$")
 _ASPECT_RE = re.compile(r"^[a-zA-Z0-9_]+$")
+_POLL_INTERVAL_S = 0.02  # matches LinksService / MeshChatX cadence
 
 
 class PacketError(Exception):
@@ -53,25 +56,36 @@ class PacketsService:
         self._hub = hub
         self._identities = identities
 
-    def _resolve_identity(self, identity_hash: bytes):
-        """Return an RNS.Identity for *identity_hash* if we know it.
+    def _try_local_identity(self, input_hash: bytes):
+        """Fast-path: return an identity from the local .rid store, or None.
 
-        Tries the local identity store first (identities we've generated
-        ourselves) and falls back to RNS.Identity.recall, which succeeds when
-        we've received an announce carrying this identity's public key.
+        Identities we've generated ourselves resolve without touching the
+        network. Falls through silently otherwise so
+        RNS.Identity.recall can be tried after the path lookup.
         """
-        hex_hash = identity_hash.hex()
-        if self._identities is not None:
-            try:
-                identity = self._identities.load(hex_hash)
-                log.debug("resolved identity %s from local IdentityService", hex_hash)
-                return identity
-            except Exception as e:
-                log.debug("local IdentityService could not load %s (%s); trying RNS.Identity.recall", hex_hash, e)
-        identity = RNS.Identity.recall(identity_hash)
-        if identity is None:
-            log.debug("RNS.Identity.recall(%s) returned None — no announce received", hex_hash)
-        return identity
+        if self._identities is None:
+            return None
+        hex_hash = input_hash.hex()
+        try:
+            identity = self._identities.load(hex_hash)
+            log.debug("resolved identity for %s from local IdentityService", hex_hash)
+            return identity
+        except Exception as e:
+            log.debug(
+                "local IdentityService could not load %s (%s); will consult RNS announce cache after path lookup",
+                hex_hash, e,
+            )
+            return None
+
+    async def _request_path(self, dest_hash: bytes, timeout: float = 15.0) -> None:
+        log.debug("issuing RNS path request for %s", dest_hash.hex())
+        try:
+            RNS.Transport.request_path(dest_hash)
+        except Exception as e:
+            log.warning("RNS.Transport.request_path(%s) raised: %s", dest_hash.hex(), e)
+        deadline = time.monotonic() + timeout
+        while not RNS.Transport.has_path(dest_hash) and time.monotonic() < deadline:
+            await asyncio.sleep(_POLL_INTERVAL_S)
 
     # ---------- listening ----------
 
@@ -146,9 +160,14 @@ class PacketsService:
         aspects: list[str],
         data_b64: str,
         proof_timeout: Optional[float] = None,
+        path_lookup_timeout: float = 15.0,
     ) -> dict:
-        ih = identity_hash_hex.lower()
-        if not _HEX_HASH.match(ih):
+        # `identity_hash_hex` accepts either an identity hash or a
+        # destination hash — the local .rid store keys on identity hashes,
+        # while `RNS.Identity.recall` looks up by destination hash. The
+        # code below tries both, matching LinksService's dual-key handling.
+        h = identity_hash_hex.lower()
+        if not _HEX_HASH.match(h):
             log.warning("session %s packet send rejected — invalid identity hash %r", session.id, identity_hash_hex)
             raise PacketError(f"invalid identity hash: {identity_hash_hex!r}")
         if not isinstance(app_name, str) or not _ASPECT_RE.match(app_name):
@@ -163,17 +182,51 @@ class PacketsService:
             log.warning("session %s packet send: invalid base64 data_b64: %s", session.id, e)
             raise PacketError(f"data_b64 is not valid base64: {e}") from None
 
-        identity_hash = bytes.fromhex(ih)
-        target_identity = self._resolve_identity(identity_hash)
+        # Derive the on-wire destination hash so we can look up a path
+        # without needing the full Identity object yet. RNS.Destination.hash
+        # accepts identity-hash bytes directly.
+        input_hash_bytes = bytes.fromhex(h)
+        dest_hash_bytes = RNS.Destination.hash(input_hash_bytes, app_name, *aspects)
+
+        # Fast path: identity we own locally.
+        target_identity = self._try_local_identity(input_hash_bytes)
+
+        # Path lookup runs regardless of local resolution — RNS.Packet
+        # needs a route. The correct order is `has_path` first, then
+        # `request_path` + wait, THEN `Identity.recall` — the path-request
+        # response populates the announce cache that recall consults.
+        if not RNS.Transport.has_path(dest_hash_bytes):
+            await self._request_path(dest_hash_bytes, path_lookup_timeout)
+            if not RNS.Transport.has_path(dest_hash_bytes):
+                log.warning(
+                    "no path to %s after %.1fs — proceeding anyway (RNS may still retry)",
+                    dest_hash_bytes.hex(), path_lookup_timeout,
+                )
+            else:
+                log.debug("path to %s resolved", dest_hash_bytes.hex())
+
+        # If local didn't have it, try the announce cache now (possibly
+        # populated by the path-request response).
+        if target_identity is None:
+            target_identity = RNS.Identity.recall(dest_hash_bytes)
+            if target_identity is None:
+                log.debug(
+                    "RNS.Identity.recall(%s) returned None — no announce received for this hash",
+                    dest_hash_bytes.hex(),
+                )
+            else:
+                log.debug(
+                    "resolved identity for %s via RNS.Identity.recall (announce cache)",
+                    dest_hash_bytes.hex(),
+                )
+
         if target_identity is None:
             log.warning(
-                "session %s packet send rejected — identity %s not known "
+                "session %s packet send rejected — identity of %s not known "
                 "(no announce received and no local identity file)",
-                session.id, ih,
+                session.id, dest_hash_bytes.hex(),
             )
-            raise PacketError(
-                "no known identity for hash — send an announce or issue a path request first"
-            )
+            raise PacketError("no known identity for hash — send an announce or issue a path request first")
 
         out_destination = RNS.Destination(
             target_identity,

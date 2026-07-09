@@ -59,6 +59,7 @@ async def test_open_rejects_unknown_identity(client):
             "app_name": "rnsapi_test",
             "aspects": ["x"],
             "await_established": False,
+            "path_lookup_timeout": 0.1,
         },
     )
     assert r.status == 404

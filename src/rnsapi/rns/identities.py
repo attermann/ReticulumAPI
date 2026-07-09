@@ -80,7 +80,7 @@ class IdentityService:
             raise IdentityError(f"invalid identity hash: {hash_hex!r}")
         path = self._storage.identities_dir / f"{h}.rid"
         if not path.exists():
-            raise IdentityError(f"identity not found: {hash_hex}")
+            raise IdentityError(f"identity not found for {hash_hex}")
         identity = RNS.Identity.from_file(str(path))
         if identity is None:
             raise IdentityError(f"identity file corrupt: {path}")

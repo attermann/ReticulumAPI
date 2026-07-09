@@ -4,13 +4,13 @@ REST:
 - POST   /packets/listen                  body: {destination_hash}
 - DELETE /packets/listen/{hash}
 - GET    /packets/listen                  — list current listeners
-- POST   /packets/send                    body: {identity_hash, app_name, aspects, data_b64, proof_timeout?}
+- POST   /packets/send                    body: {identity_hash, app_name, aspects, data_b64, proof_timeout?, path_lookup_timeout?}
 
 WS:
 - packets.listen        params: {destination_hash}
 - packets.unlisten      params: {destination_hash}
 - packets.listeners     — reply with list
-- packets.send          params: {identity_hash, app_name, aspects, data_b64, proof_timeout?}
+- packets.send          params: {identity_hash, app_name, aspects, data_b64, proof_timeout?, path_lookup_timeout?}
 
 Server-emitted events (session-scoped):
 - packet.received            — a packet arrived on a listened destination
@@ -72,6 +72,7 @@ async def rest_send(request: web.Request) -> web.Response:
     aspects = body.get("aspects", [])
     data_b64 = body.get("data_b64")
     proof_timeout = body.get("proof_timeout")
+    path_lookup_timeout = body.get("path_lookup_timeout")
     if not isinstance(identity_hash, str):
         return web.json_response({"error": "identity_hash required"}, status=400)
     if not isinstance(app_name, str):
@@ -82,8 +83,13 @@ async def rest_send(request: web.Request) -> web.Response:
         return web.json_response({"error": "data_b64 required"}, status=400)
     if proof_timeout is not None and not isinstance(proof_timeout, (int, float)):
         return web.json_response({"error": "proof_timeout must be a number"}, status=400)
+    if path_lookup_timeout is not None and not isinstance(path_lookup_timeout, (int, float)):
+        return web.json_response({"error": "path_lookup_timeout must be a number"}, status=400)
+    send_kwargs = {"proof_timeout": proof_timeout}
+    if path_lookup_timeout is not None:
+        send_kwargs["path_lookup_timeout"] = float(path_lookup_timeout)
     try:
-        result = await svc.send(session, identity_hash, app_name, aspects, data_b64, proof_timeout=proof_timeout)
+        result = await svc.send(session, identity_hash, app_name, aspects, data_b64, **send_kwargs)
     except PacketError as e:
         # 404 when the identity isn't recallable, 400 for validation errors
         status = 404 if "no known identity" in str(e) else 400
@@ -145,6 +151,7 @@ async def ws_send(conn, msg: dict) -> None:
     aspects = msg.get("aspects", [])
     data_b64 = msg.get("data_b64")
     proof_timeout = msg.get("proof_timeout")
+    path_lookup_timeout = msg.get("path_lookup_timeout")
     if not isinstance(identity_hash, str):
         await conn.send_json({"type": "error", "error": "identity_hash required", "id": msg.get("id")})
         return
@@ -157,8 +164,14 @@ async def ws_send(conn, msg: dict) -> None:
     if not isinstance(data_b64, str):
         await conn.send_json({"type": "error", "error": "data_b64 required", "id": msg.get("id")})
         return
+    if path_lookup_timeout is not None and not isinstance(path_lookup_timeout, (int, float)):
+        await conn.send_json({"type": "error", "error": "path_lookup_timeout must be a number", "id": msg.get("id")})
+        return
+    send_kwargs = {"proof_timeout": proof_timeout}
+    if path_lookup_timeout is not None:
+        send_kwargs["path_lookup_timeout"] = float(path_lookup_timeout)
     try:
-        result = await svc.send(conn.session, identity_hash, app_name, aspects, data_b64, proof_timeout=proof_timeout)
+        result = await svc.send(conn.session, identity_hash, app_name, aspects, data_b64, **send_kwargs)
     except PacketError as e:
         await conn.send_json({"type": "error", "error": str(e), "id": msg.get("id")})
         return
